@@ -82,14 +82,14 @@ Add these highly performant geometry libraries to `Cargo.toml` under `hwc-export
 
 ```toml
 [dependencies]
-clipper2 = "0.1"   # Pure Rust Clipper library for union/difference operations
-earcutr = "0.4"    # Fast 2D polygon triangulation library
+clipper2-rust = "1.0"   # Pure Rust port of Clipper2 (no FFI, fast compilation)
+earcut = "0.4"          # GeoRust zero-allocation triangulator (3x faster than earcutr)
 ```
 
 ### Library Selection Rationale
 
-- **clipper2**: Industry-standard polygon clipping using integer coordinates (prevents floating-point rounding errors)
-- **earcutr**: Fast, robust triangulation algorithm that handles complex polygons with holes
+- **clipper2-rust**: Native Rust implementation of the Vatti clipping algorithm. Eliminates C++ toolchain dependencies and FFI overhead, allowing for aggressive compiler inlining and faster builds.
+- **earcut**: Maintained by the GeoRust team, this crate features a zero-allocation architecture. It reuses internal buffers to minimize heap pressure during complex board triangulations.
 
 ---
 
@@ -102,7 +102,7 @@ These helpers convert 3D primitives (Cylinders/Pads, Rectangular Pours, and Ribb
 ```rust
 // In hwc-export/src/geometry_union.rs or directly inside substrate.rs
 use hwc_engine::geometry::BoundingBox;
-use clipper2::{Path64, Paths64, Point64};
+use clipper2_rust::{Path64, Paths64, Point64};
 
 /// Convert an axis-aligned bounding box to a closed Clipper path (in nanometers)
 pub fn rect_to_path(bbox: &BoundingBox) -> Path64 {
@@ -151,6 +151,7 @@ pub fn extrude_polygon_mesh(
 ) -> MeshNode {
     let mut vertices = Vec::new();
     let mut faces = Vec::new();
+    let mut triangulator = earcut::Earcut::new();
 
     // Helper to map 2D coordinates to 3D scene space based on active view
     let map_vertex = |ex: f64, ey: f64, ez: f64| -> Vertex {
@@ -191,21 +192,24 @@ pub fn extrude_polygon_mesh(
         vertices.push(map_vertex(x, y, z_min + depth));
     }
 
-    // 1. Triangulate Caps using Earcutr
-    if let Ok(triangles) = earcutr::earcut(&flat_coords, &hole_indices, 2) {
-        for chunk in triangles.chunks_exact(3) {
-            let (v0, v1, v2) = (chunk[0], chunk[1], chunk[2]);
+    // 1. Triangulate Caps using Earcut (GeoRust Optimized)
+    // The earcut crate (GeoRust) is used with its zero-allocation architecture to triangulate the resulting complex polygons.
+    let mut triangles = Vec::new();
+    let data = flat_coords.chunks_exact(2).map(|c| [c[0], c[1]]);
+    triangulator.earcut(data, &hole_indices, &mut triangles);
 
-            // Bottom Cap (facing down, CW winding from inside)
-            faces.push(Face {
-                vertices: vec![v0 * 2, v2 * 2, v1 * 2],
-            });
+    for chunk in triangles.chunks_exact(3) {
+        let (v0, v1, v2) = (chunk[0], chunk[1], chunk[2]);
 
-            // Top Cap (facing up, CCW winding from outside)
-            faces.push(Face {
-                vertices: vec![v0 * 2 + 1, v1 * 2 + 1, v2 * 2 + 1],
-            });
-        }
+        // Bottom Cap (facing down, CW winding from inside)
+        faces.push(Face {
+            vertices: vec![v0 * 2, v2 * 2, v1 * 2],
+        });
+
+        // Top Cap (facing up, CCW winding from outside)
+        faces.push(Face {
+            vertices: vec![v0 * 2 + 1, v1 * 2 + 1, v2 * 2 + 1],
+        });
     }
 
     // 2. Generate side walls
@@ -315,8 +319,11 @@ for ((z_min_nm, z_max_nm, material_id, net_id), layers) in copper_groupings {
         }
     }
     
-    // Run Clipper Union
-    let union_result = clipper2::union(&clipper_paths, clipper2::FillRule::EvenOdd);
+    // Run Clipper Union using clipper2-rust v1.0 API
+    // v0.1.8 FIXED: Use NonZero fill rule to merge overlapping copper into a solid manifold (Non-Zero Winding Fix)
+    // Overlapping shapes must be unified using the Non-Zero winding rule. Using the default 
+    // EvenOdd rule would result in hollow gaps where two copper elements intersect.
+    let union_result = clipper2_rust::union_64(&clipper_paths, &Vec::new(), clipper2_rust::core::FillRule::NonZero);
     
     if let Some(unioned_paths) = union_result {
         // Convert nanometer integer Clipper output back into precise f64 millimeters
@@ -325,7 +332,7 @@ for ((z_min_nm, z_max_nm, material_id, net_id), layers) in copper_groupings {
         
         for path in unioned_paths {
             let mut points = Vec::new();
-            for pt in path {
+            for pt in &path {
                 points.push((
                     pt.x as f64 / 1_000_000.0, 
                     pt.y as f64 / 1_000_000.0
@@ -333,7 +340,7 @@ for ((z_min_nm, z_max_nm, material_id, net_id), layers) in copper_groupings {
             }
             
             // Clipper represents holes as clockwise and outer bounds as counter-clockwise
-            if clipper2::is_positive(&path) {
+            if clipper2_rust::is_positive(&path) {
                 outer_contours.push(points);
             } else {
                 holes.push(points);
@@ -382,7 +389,7 @@ This test validates the foundation before applying it to complex layouts.
 ```rust
 #[cfg(test)]
 mod tests {
-    use clipper2::{Path64, Paths64, Point64, FillRule};
+    use clipper2_rust::{Path64, Paths64, Point64, FillRule};
 
     #[test]
     fn test_coreldraw_boolean_handshake() {
@@ -416,7 +423,7 @@ mod tests {
 
         // --- OPERATION 1: UNION (Weld) ---
         // Merges both into a single continuous polygon
-        let weld_result = clipper2::union(&subjects, &clips, FillRule::EvenOdd);
+        let weld_result = clipper2_rust::union(&subjects, &clips, FillRule::EvenOdd);
         assert!(weld_result.is_some());
         
         let welded_paths = weld_result.unwrap();
@@ -426,7 +433,7 @@ mod tests {
 
         // --- OPERATION 2: DIFFERENCE (Trim) ---
         // Cuts the circle out of the square, leaving a crescent bite mark
-        let trim_result = clipper2::difference(&subjects, &clips, FillRule::EvenOdd);
+        let trim_result = clipper2_rust::difference(&subjects, &clips, FillRule::EvenOdd);
         assert!(trim_result.is_some());
         
         let trimmed_paths = trim_result.unwrap();
