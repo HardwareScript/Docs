@@ -74,6 +74,12 @@ space BareMetal_SSD_Controller:
 
 **How the Compiler handles this**: The IR Builder converts `z: 150um` to `150,000nm`. It then divides by the space's internal Z-voxel size to find the correct array index. The user never sees or cares about the array.
 
+### 3.1 Net-Aware Geometric Termination (v0.1.8)
+A critical rule for physical accuracy: **Vias do not drill through their target net.**
+- **Through-Hole Vias**: Span the entire board (Top surface to Bottom surface).
+- **Blind/Buried Microvias**: Must terminate at the **top surface** (for contacts from above) or **bottom surface** (for contacts from below) of the target inner copper layer. 
+- **Micro-Sinking**: To prevent visual Z-fighting, the via terminates 500nm *inside* the target copper layer. This ensures a solid volumetric overlap and a stable render without "Phantom Plates" appearing underneath the trace.
+
 ---
 
 ## 4. Paradigm B: The High-Level Format (Semantic Intent)

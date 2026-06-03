@@ -33,13 +33,34 @@ if my_precedence < other_precedence {
 }
 ```
 
-### Propagated Culling
-The `FaceCulling` bitmask is now a first-class parameter in all mesh generation functions:
-- `create_box_mesh`
-- `create_cylinder_mesh`
-- `create_box_with_holes_mesh` (Manifold Rule)
+### 3.1 Extension: Same-Net Copper Handshake (v0.1.8)
+The standard precedence rule handles Copper-on-FR4 perfectly, but same-material interfaces (e.g., a Via Pad sitting on a Trace) require an additional rule.
 
-## 4. Benefits
+#### 3.1.1 Bounding Box Match Guard
+If two layers have the same material, same net, and same precedence:
+- The **lower layer** in the Z-stack culls its **top face** ONLY if their XY bounding boxes match exactly (e.g., stacked planes).
+- This prevents "Open Box" artifacts where a partial overlap (like a via on a trace) would otherwise delete the entire top face of the trace.
+
+#### 3.1.2 Micro-Sinking (Z-Offset)
+For partial intersections (vias landing on traces), Z-fighting is eliminated by sinking the via slightly (500nm) into the target copper volume. This hides the shared coplanar faces inside the solid copper volume without requiring mesh culling.
+
+## 4. The Long-Term Vision: Strategy A (Physical Unioning)
+While culling and micro-sinking provide immediate visual stability, the ultimate architectural goal for Hardware Script is **Strategy A: 2D Co-Union / 3D Boolean Union**.
+
+### 4.1 Why Physical Unioning?
+- **Engineering Fidelity**: Engineering solvers (FEA, Thermal, EM) require non-overlapping, manifold geometry.
+- **Additive Manufacturing**: 3D printers require unified contours to avoid over-deposition.
+- **Physical Truth**: In a real PCB, the copper of a via and a trace are a single contiguous lattice of atoms.
+
+### 4.2 Implementation Path
+Instead of extruding separate boxes and cylinders, the compiler will:
+1.  Collect all copper shapes on the same net and layer.
+2.  Perform a **2D Polygon Union** (using a clipper algorithm).
+3.  Extrude the resulting unified contour into a single manifold 3D mesh.
+
+This transformation from "Separate Meshes with Hacks" to "Unified Physical Geometry" is the core mission of the v0.1.8 cycle.
+
+## 5. Benefits
 - **Zero Flickering**: Perfectly stable rendering in all GLB/glTF viewers (WebGL, WebGPU, Blender, etc.).
 - **100% Accurate Coordinates**: 1.0000mm remains 1.0000mm. No "silent magic" offsets are added to the file.
 - **Scalable Architecture**: The system scales automatically. If you add a new material (e.g., Solder Mask), it simply needs a precedence value to participate in the handshake.
