@@ -18,7 +18,7 @@ This document specifies the implementation of **Strategy A: 2D Polygon Unioning*
 
 ---
 
-## 1. The 2D Unioning Pipeline
+## 1. The 2D Unioning Pipeline (v0.1.7)
 
 ```
 [Copper Pours]       [Via Landing Pads]      [Traces / Ribbons]
@@ -29,6 +29,9 @@ This document specifies the implementation of **Strategy A: 2D Polygon Unioning*
                                |
                                v
               [ Clipper 2D Polygon Union Engine ]
+                               |
+                               v
+           [ PolyTree Hole Association (v0.1.7) ]
                                |
                                v
               Unioned 2D Contours (Outer & Holes)
@@ -42,15 +45,18 @@ This document specifies the implementation of **Strategy A: 2D Polygon Unioning*
 
 ---
 
-## 2. Mathematical Foundation: CorelDraw Boolean Operations
+## 2. Mathematical Foundation: Boolean Operations & Hole Association
 
-The operations described in CorelDraw map directly to computational geometry operations:
+The operations described in CorelDraw map directly to computational geometry operations. Version 0.1.7 introduces **PolyTree Hole Association** to solve complex triangulation artifacts.
 
-| CorelDraw Operation | Clipper Operation | Use Case in Hardware Compiler |
+| Operation | Clipper / Tool | Use Case in Hardware Compiler |
 |:---|:---|:---|
 | **Weld** | `Union` | Merge traces and pads into unified copper islands |
 | **Trim / Cut out** | `Difference` | Cut via holes out of FR4 substrate or antipads out of planes |
-| **Intersect** | `Intersection` | Find overlapping regions for DRC validation |
+| **Hole Association** | `PolyTree` | Correctly nesting via holes inside the specific copper island they belong to |
+
+### Visual Reference: The "Wedge" Fix
+In previous versions, passing all holes to a single triangulation call resulted in "wedge" artifacts (ghost triangles). v0.1.7 uses `PolyTree` to traverse the geometry hierarchy, ensuring each triangulation call only receives holes that are physically inside that specific island.
 
 ### Visual Reference
 

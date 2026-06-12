@@ -33,6 +33,9 @@ To bridge the gap between abstract logical routing and exact material chemistry,
 ### The Via-Stamping "Sandwich" Rule
 The auto-via inserter creates a **Compound Via** by stamping exactly one voxel layer of the specified bridge material (e.g., `Titanium_Silicide`) at the exact boundary, and filling the rest of the vertical column with the low-resistance fill material (e.g., `Tungsten`).
 
+### 2.1 Post-Realization Structural Integrity (v0.1.7)
+To ensure the "Butler" principle holds for manual routing, the compiler runs a **Post-Realization Drill Pass**. This pass re-analyzes the physical board after manual traces are converted to copper, ensuring that any trace overlapping a via is correctly carved with the appropriate structural hole.
+
 ## Section 3: Code-Defined Dummy Metal Fill (Thieving)
 
 To prevent silicon wafer warping during Chemical-Mechanical Polishing (CMP) or to maintain uniform copper density on high-frequency PCBs, the compiler supports **Dummy Metal Fill (Thieving)**.

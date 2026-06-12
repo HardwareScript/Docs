@@ -44,24 +44,20 @@ If two layers have the same material, same net, and same precedence:
 #### 3.1.2 Micro-Sinking (Z-Offset)
 For partial intersections (vias landing on traces), Z-fighting is eliminated by sinking the via slightly (500nm) into the target copper volume. This hides the shared coplanar faces inside the solid copper volume without requiring mesh culling.
 
-## 4. The Long-Term Vision: Strategy A (Physical Unioning)
-While culling and micro-sinking provide immediate visual stability, the ultimate architectural goal for Hardware Script is **Strategy A: 2D Co-Union / 3D Boolean Union**.
+## 4. The Implementation: Strategy A (Physical Unioning)
+The architectural goal for Hardware Script is now reality in v0.1.7: **Strategy A: 2D Co-Union / 3D Boolean Union**.
 
 ### 4.1 Why Physical Unioning?
-- **Engineering Fidelity**: Engineering solvers (FEA, Thermal, EM) require non-overlapping, manifold geometry.
-- **Additive Manufacturing**: 3D printers require unified contours to avoid over-deposition.
-- **Physical Truth**: In a real PCB, the copper of a via and a trace are a single contiguous lattice of atoms.
+-   **Engineering Fidelity**: Engineering solvers (FEA, Thermal, EM) require non-overlapping, manifold geometry.
+-   **Additive Manufacturing**: 3D printers require unified contours to avoid over-deposition.
+-   **Physical Truth**: In a real PCB, the copper of a via and a trace are a single contiguous lattice of atoms.
 
-### 4.2 Implementation Path
-Instead of extruding separate boxes and cylinders, the compiler will:
-1.  Collect all copper shapes on the same net and layer.
-2.  Perform a **2D Polygon Union** (using a clipper algorithm).
-3.  Extrude the resulting unified contour into a single manifold 3D mesh.
-
-This transformation from "Separate Meshes with Hacks" to "Unified Physical Geometry" is the core mission of the v0.1.8 cycle.
+### 4.2 Material Synchronization (v0.1.7)
+To enable perfect unioning, the compiler now performs **Automatic Material Synchronization**. 
+-   **Manual Traces**: Inherit the material of the layer they are placed on (e.g., `ViaCopper` from the stackup).
+-   **Binding Logic**: Pours and pads are grouped by `(Layer, Net, Material)`. By ensuring materials match, they are merged into a single manifold mesh, completely eliminating Z-fighting without rendering hacks.
 
 ## 5. Benefits
 - **Zero Flickering**: Perfectly stable rendering in all GLB/glTF viewers (WebGL, WebGPU, Blender, etc.).
 - **100% Accurate Coordinates**: 1.0000mm remains 1.0000mm. No "silent magic" offsets are added to the file.
-- **Scalable Architecture**: The system scales automatically. If you add a new material (e.g., Solder Mask), it simply needs a precedence value to participate in the handshake.
-- **Manifold Geometry**: The resulting files are cleaner for downstream tools like 3D slicers or thermal simulators, as they contain no redundant internal faces.
+- **Structural Integrity**: Via holes are carved exactly at the drill diameter with 0nm same-net clearance, ensuring physical truth.
