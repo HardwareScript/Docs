@@ -169,3 +169,32 @@ By combining Unified Primitives, Dynamic Cap Extraction, and 2D Clipper Unioning
 | **The "Hollow-Trough" Bug** | Blindly culling the top/bottom faces of trace slices due to local overlaps. | Face culling is protected by a **Bounding Box Match Guard**. Slices only cull their faces if they overlap completely (stackup layers). Local overlaps (pads on traces) are left solid. |
 | **The "Solid-Via" Bug** | Treating 3D vertical vias as 2D flat copper layers, losing their hollow cores. | **Dynamic Cap Extraction** separates the 3D hollow tube from the flat caps. The tube remains a hollow cylinder, while only the flat rings are merged with the trace. |
 | **Simulation Failures** | Overlapping, interpenetrating meshes confuse boundary calculation engines. | The exporter output is a **perfect, non-overlapping solid manifold**. There are no duplicate volumes or internal hidden walls, ensuring accurate simulation in thermal and electromagnetic solvers. |
+
+## 7. The 4-Mode Shape Design System
+
+The shape system extends the microkernel's generic primitives with a unified shape design paradigm that supports four levels of abstraction, allowing designers to work at their preferred level of complexity.
+
+### Four Design Paradigms
+
+| Paradigm | Abstraction Level | Example |
+| :--- | :--- | :--- |
+| **Manual** | Lowest level, full control | Direct polygon coordinates: `Point(0,0), Point(1000,0), ...` |
+| **Parametric** | Equation-driven with variables | `let r = width/2; Circle(r)` with variable substitution |
+| **CSG** | Boolean operations on primitives | `Union(circle, rect) - Circle(...)` for complex outlines |
+| **Procedural** | Algorithmic generation | `star_generator_contour(points=5, width=1000nm)` |
+
+These paradigms are implemented via geometry blocks in the AST and evaluated by dedicated shape generators.
+
+### Integration with Via System
+
+The shape system integrates with the via insertion pipeline through profile parameters:
+
+- **`via: shape:`** parameter in stackup profiles specifies which shape generator to use for auto-via insertion
+- The compiler evaluates shape contours and scales them to the via diameter using the `width` parameter
+- Custom contacts with `shape:` parameter enable multi-shape stitching within a single space, with collision detection to prevent overlaps
+
+### Multi-Shape Stitching
+
+Multiple shapes can coexist in a single layout space through custom contact declarations that reference different shape generators. The compiler performs collision detection and union operations to create unified copper geometries from diverse shape sources.
+
+For complete details on the shape system architecture, see [SHAPE-SYSTEM-ARCHITECTURE.md](./SHAPE-SYSTEM-ARCHITECTURE.md).
