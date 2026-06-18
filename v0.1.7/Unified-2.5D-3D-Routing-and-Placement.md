@@ -73,12 +73,12 @@ Silicon layouts require strictly orthogonal paths snapped to predefined manufact
 
 ---
 
-## Section 3: The "Origin-Facing Box Model" (Pin Escape & Docking)
+## Section 3: The "Strict Boundary-Docking Box Model" (Pin Escape & Docking)
 
-> **Implementation Status (v0.1.7):** ✅ Complete — All three subsections implemented.
+> **Implementation Status (v0.1.7):** ✅ Complete — Strict Interior Lockout enforced.
 > - **3.1 Port Selection Heuristic**: Implemented in `port_escape.rs` with `smart_corner_clamp()`
-> - **3.2 Escape Vector Enforcement**: Implemented in `calculate_rect_escape()` and `calculate_circular_escape()` — orthogonal escape step computed and returned with direction vector
-> - **3.3 Virtual Sub-Ports**: Partially implemented — parallel trace sub-ports handled by `edge_offset` percentage positioning; floor count not yet computed dynamically
+> - **3.2 Escape Vector Enforcement**: Implemented in `calculate_rect_escape()` and `calculate_circular_escape()`
+> - **3.3 Strict Interior Lockout**: Implemented in `router.rs` — All component interiors are impenetrable obstacles.
 
 To prevent traces from colliding with the pins they are exiting, the router utilizes the **Origin-Facing Box Model**. Every landing pad, pin, or via is represented as a bounding box with four virtual cardinal **Docking Ports** (North, South, East, West).
 

@@ -17,6 +17,8 @@
       *Implemented: `EdgeOffset` enum with `resolve_offset_to_ratio()`*
 - [x] **Section 3** — Smart Corner Clamping (trace overhang prevention)
       *Implemented: `smart_corner_clamp()` with unit tests*
+- [x] **Section 4** — Strict Boundary-Docking Box Model (Interior Lockout)
+      *Implemented: A* solver blocks interior of all component bboxes in `router.rs`*
 - [x] **Section 4.1** — Bounding Box Projection for circular pads
       *Implemented: `calculate_circular_escape()` virtual bbox creation*
 - [x] **Section 4.2** — Radial Projection Step (box→circle coordinate mapping)
@@ -228,3 +230,20 @@ route West.P to East.P:
     exit: East                # Defaults to the exact middle of the East edge
     enter: West               # Defaults to the exact middle of the West edge
 ```
+
+---
+
+## Section 6: The Strict Boundary-Docking Box Model
+
+To eliminate coordinate-quantization bugs and overlapping trace loops, the system enforces a strict **Boundary-Docking Box Model**. This model treats every pad, pin, and via as a solid block of copper where the router is physically prevented from entering.
+
+### 6.1 Interior Lockout Rule
+During the routing phase, the entire interior volume of the component's bounding box is marked as an impenetrable obstacle (`Cost::INFINITE`). The only coordinates within that box allowed to have a valid path are the exact points of the selected boundary ports.
+
+### 6.2 Zero-Internal-Routing
+Because the physical pad is a zero-resistance block of copper, no internal traces are drawn. The pad itself acts as the electrical bridge between any connected ports (e.g., a signal entering through the South port and exiting through the West port).
+
+### 6.3 Benefits
+1. **Phantom Via Elimination**: Traces terminate exactly on the boundary, preventing the "Z-axis dive" that creates redundant vias.
+2. **Deterministic Exports**: DXF and GDSII masks show traces ending flush at the pad edges, ensuring manufacturing-ready outputs.
+3. **Reduced Search Space**: Bypassing component interiors speeds up A* pathfinding.
