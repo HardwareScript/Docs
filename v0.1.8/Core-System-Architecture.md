@@ -727,6 +727,91 @@ The **G-Cell-Local Unified Sweep Verification** resolves this by replacing the g
 
 ---
 
+## Subsystem 23: Pattern-Guided Meander Injection (Two-Phase Post-Route)
+
+### 1. Core Abstraction
+Traditional pattern-guided routers embed meander geometry into the A* heuristic during pathfinding. This creates an $O(B^d)$ state-space explosion where $B$ is the branching factor and $d$ is the path depth—the router must evaluate every possible meander placement at every expansion step, causing compile times to scale exponentially on dense boards. Furthermore, only ~5% of nets in a typical design require length tuning, so routing 100% of nets through a pattern-aware A* is wasteful.
+
+The **Pattern-Guided Meander Injection** subsystem resolves this by implementing a two-phase approach: Phase 1 routes all nets straight (fastest possible A*). Phase 2 scans the routed paths, selects the longest segment per net, and analytically injects meander waypoints using closed-form polar decomposition.
+
+```
+  Phase 1: Straight Routing              Phase 2: Meander Injection
+  ┌──────────────────────────┐           ┌──────────────────────────────┐
+  │ A* routes all nets       │           │ MeanderInjector scans paths  │
+  │ with zero pattern intent │ ────────► │ Selects longest segment      │
+  │ Fastest possible routing │           │ Decomposes pattern into XY   │
+  └──────────────────────────┘           │ Injects waypoints at midpoint│
+                                         │ Expands 4 pts → 21 pts      │
+                                         └──────────────────────────────┘
+```
+
+### 2. Algorithmic Engine
+1. **Policy Collection:** The compiler collects `RouteNetPolicy` declarations from the space AST, resolves net names to `NetId`s, and instantiates patterns by evaluating step expressions with the provided arguments (e.g., `Zigzag(gap: 0.5mm)` → 4 steps of 500,000 nm at angles [90°, 0°, -90°, 0°]).
+
+2. **Longest Segment Selection:** For each net with a policy, scan all path segments (from MST decomposition) and select the one with the highest Manhattan length as the meander insertion target. The midpoint of this segment becomes the meander center.
+
+3. **Closed-Form Meander Height:** Given the total forward distance of the pattern:
+   $$\text{total\_forward} = \sum_{i} d_i \cdot \cos(\theta_i)$$
+   And the number of repetitions (computed from the segment length divided by total forward distance), the meander half-span is:
+   $$\text{half\_span} = \frac{\text{total\_forward}}{2}$$
+   No iterative trial-and-error is required.
+
+4. **Polar-to-Cartesian Decomposition:** Starting from `center - half_span`, each pattern step is decomposed:
+   - **Forward component:** $d_x = d \cdot \cos(\theta)$ (along segment direction)
+   - **Perpendicular component:** $d_y = d \cdot \sin(\theta)$ (perpendicular to segment)
+   - For **horizontal segments**: forward = X, perpendicular = Y
+   - For **vertical segments**: forward = Y, perpendicular = X
+   This creates the characteristic back-and-forth meander geometry.
+
+5. **Collision Detection:** Before injection, the engine constructs a bounding box around the meander path (inflated by `trace_width × 2`) and checks for intersections with adjacent traces using Minkowski-inflated AABB intersection. If a collision is detected, injection is skipped for that segment—no DRC violations are introduced.
+
+6. **EntityGraph State-Sync:** After injection, the engine clears old route segments for the affected net from the EntityGraph and re-registers the expanded meandered paths canonically. The expanded paths are then processed by the AnalyticTrace converter and persisted to the lockfile.
+
+### 3. Data Flow & Pipeline Integration
+*   **Input:** Receives straight-routed paths from the AutoRouter (Phase 1) and resolved `RoutingPattern` objects from pattern/strategy instantiation.
+*   **Output:** Generates meandered paths with expanded waypoint counts; syncs to EntityGraph; feeds into the 45° Miter Pass and AnalyticTrace conversion.
+
+---
+
+## Subsystem 24: 45° Mitered Chamfer Pass (Impedance-Stable Corner Geometry)
+
+### 1. Core Abstraction
+After meander injection, trace paths contain 90° orthogonal corners. At high frequencies (>5 GHz), 90° corners create impedance discontinuities due to excess capacitance at the corner vertex. The capacitance scales with the corner area, causing signal reflections and timing jitter on high-speed serial links.
+
+The **45° Mitered Chamfer Pass** resolves this by scanning every routed path for 90° corners and inserting diagonal chamfer points. The chamfer distance is proportional to the trace width (`1.5 × W`), maintaining constant characteristic impedance ($Z_0$) through the bend per IPC-2152 guidelines.
+
+```
+  Before Miter: 90° Corner          After Miter: 45° Chamfer
+  
+       ┌──────                          ┌──────
+       │                                │╲
+       │                                │ ╲  ← 45° diagonal
+       │                                │  ╲    (miter_dist = 1.5 × W)
+       └──────                          └──────
+  
+  Excess capacitance at vertex    Smooth current flow, constant Z₀
+```
+
+### 2. Algorithmic Engine
+1. **Corner Detection:** For each consecutive triple of waypoints $(P_{i-1}, P_i, P_{i+1})$, compute the direction vectors $\vec{d_1} = P_i - P_{i-1}$ and $\vec{d_2} = P_{i+1} - P_i$ in the XY plane. The dot product $\vec{d_1} \cdot \vec{d_2} = 0$ indicates a 90° corner. Z-axis differences are ignored because the miter is a 2D copper geometry operation on the routing layer.
+
+2. **Miter Distance:** The chamfer insertion distance from the corner vertex is:
+   $$\text{miter\_dist} = \text{trace\_width} \times 1.5$$
+   This ratio preserves $Z_0$ continuity for microstrip and stripline geometries.
+
+3. **Chamfer Point Insertion:** For a 90° corner at $P_i$:
+   - $P_a = P_i - \text{miter\_dist} \times \hat{d_1}$ (point along incoming direction)
+   - $P_b = P_i - \text{miter\_dist} \times \hat{d_2}$ (point along outgoing direction)
+   The single corner vertex $P_i$ is replaced with the sequence $[P_a, P_b]$, creating a 45° diagonal chamfer.
+
+4. **Path Expansion:** Each 90° corner adds 2 points to the path. A meander with 16 corners (4 Zigzag repetitions × 4 corners each) expands from 21 waypoints to 53 waypoints, all with smooth 45° transitions.
+
+### 3. Data Flow & Pipeline Integration
+*   **Input:** Receives meandered (or straight) path waypoint arrays from the MeanderInjector or AutoRouter.
+*   **Output:** Produces mitered paths with 90° corners replaced by 45° chamfer pairs; feeds into AnalyticTrace conversion for lockfile persistence and GLB/DXF export.
+
+---
+
 ## 5. Summary of the Unified Compilation Pipeline
 
 | Subsystem | Stage | Primary Responsibility | Core Performance |
@@ -753,3 +838,5 @@ The **G-Cell-Local Unified Sweep Verification** resolves this by replacing the g
 | **20. Salsa Query Engine** | Pipeline | Fine-grained memoized queries per component/route entity. | Sub-ms incremental compiles; no AST-wide invalidation cascades. |
 | **21. BEM Parasitic Extract** | Verify | Sakurai empirical microstrip R/C + Virtual Junction L/C extraction. | Millisecond extraction; 5–10% accuracy vs 3D FEM; T-junction subcircuits in SPICE. |
 | **22. G-Cell-Local Unified Sweep** | Verify | Unified sweep: different-net DRC (8-wide AVX-512) + same-net topology in single $O(N \log N + K)$ pass. | True linear Rayon scaling; eliminates redundant spatial sweeps. |
+| **23. Pattern-Guided Meander Injection** | Route | Post-route analytical meander injection using polar decomposition. | O(N log N + K); closed-form height calc; no A* state-space explosion. |
+| **24. 45° Mitered Chamfer Pass** | Refine | Scans 90° corners, inserts 45° diagonal chamfers at 1.5× trace width. | Impedance-stable bends; XY-plane-only dot product check. |

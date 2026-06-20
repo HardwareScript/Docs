@@ -166,3 +166,108 @@ By moving to this unified vector-first representation, we can significantly simp
 1.  **Deletion of Soft Keyword Hacks:** Property keys inside definitions (such as `tolerance`, `clearance`, `trace`, `via`) are no longer parsed as custom tokens. They are tokenized directly as standard `IDENTIFIER` strings, reducing the lexer's token variants by 20%.
 2.  **Removal of the String-Reparsing Loop:** In earlier versions, geometry expressions were serialized back to strings and re-parsed in a secondary, hand-rolled parser. In v0.1.8, the parser does its job once—parsing expressions directly into recursive `Expr` AST nodes. The geometry engine evaluates this tree directly, completely eliminating parsing crashes due to token spacing variations.
 3.  **Strict Semantic Separation:** The AST enforces the boundary between declarative facts (colons `:` inside property blocks) and behavioral actions (equals `=` inside logic blocks), making the compiler's backend extremely lean and robust.
+
+---
+
+## 5. Pattern & Strategy Syntax (v0.1.8-alpha)
+
+The v0.1.8 pattern system introduces **prescriptive, net-scoped routing policies** that allow users to declare meander geometry intent in source code. Patterns are "strategic guides" for the auto router—the compiler uses the pattern's mathematical steps to inject post-route meanders that add length without inline A* state-space explosion.
+
+### A. Pattern Definition
+
+A `pattern` is a named, parameterized sequence of polar steps (distance + angle). Steps are declared as a vector-first array of `[length, angle]` pairs. Parameters use `Measurement` types for picometer-integer precision in the backend.
+
+```hardware
+# 90° orthogonal meander for length matching
+pattern Zigzag (gap: Measurement):
+    strategy_goal = delay_line
+    steps: [
+        [length = gap, angle = 90],
+        [length = gap, angle = 0],
+        [length = gap, angle = -90],
+        [length = gap, angle = 0]
+    ]
+
+# DDR5-style trombone with amplitude control
+pattern Trombone (gap: Measurement, amp: Measurement):
+    strategy_goal = impedance_match
+    steps: [
+        [length = gap,       angle = 0],
+        [length = amp,       angle = 90],
+        [length = gap * 2,   angle = 0],
+        [length = amp,       angle = -90],
+        [length = gap,       angle = 0]
+    ]
+```
+
+**Key syntax rules:**
+- `strategy_goal = <identifier>` — declares the pattern's mathematical intent (optional, used for strategy resolution)
+- `steps: [[length = expr, angle = expr], ...]` — vector-first array of polar step pairs
+- Parameters are declared in parentheses: `(gap: Measurement, amp: Measurement)`
+- Expressions support arithmetic: `gap * 2`, `wavelength / 2`, `amplitude * 2`
+
+### B. Strategy Definition
+
+A `strategy` maps a named routing intent to a target length/matching mode, a tolerance, and a pattern instantiation.
+
+```hardware
+strategy DDR5_Match:
+    target = match_longest
+    tolerance = 0.1mm
+    pattern = Trombone(gap: 0.3mm, amp: 2.5mm)
+
+strategy FixedLength_50mm:
+    target = 50.0mm
+    tolerance = 0.1mm
+    pattern = Serpentine(wavelength: 3.0mm, amplitude: 1.5mm)
+
+strategy RF_Delay_Match:
+    target = 150.0ps
+    tolerance = 0.5ps
+    pattern = Serpentine(wavelength: 1.0mm, amplitude: 0.5mm)
+```
+
+**Key syntax rules:**
+- `target = match_longest` | `match_shortest` | `<Measurement>` | `<TimeValue>`
+- `tolerance = <Measurement>` or `<TimeValue>`
+- `pattern = <PatternName>(arg: value, ...)` — pattern instantiation with concrete arguments
+
+### C. Net-Scoped Route Policies (`route net:`)
+
+The `route net:` statement applies a pattern or strategy to all routes on a specific net, scoped to an optional layer. This is the primary mechanism for scalable net-scoped routing policies.
+
+```hardware
+space MyBoard:
+    route net: ALL_PADS:
+        pattern: Zigzag(gap: 0.5mm)
+
+    route net: DDR_DATA0:
+        on layer: top_copper
+        strategy: DDR5_Match
+
+    route net: CLK_100MHZ:
+        pattern: Trombone(gap: 0.3mm, amp: 2.0mm)
+```
+
+**Key syntax rules:**
+- `route net: <NetName>:` — applies to all routes on the named net
+- `on layer: <Identifier>` — optional layer scope (applies pattern only on that layer)
+- `pattern: <PatternName>(args)` — direct pattern instantiation
+- `strategy: <StrategyName>` — references a strategy definition (resolves pattern + target + tolerance)
+
+### D. Inline Pattern on Route Statements
+
+Individual route statements can also specify a pattern directly:
+
+```hardware
+route J1.p to J2.p:
+    net: NET_AUTO
+    pattern: Zigzag(gap: 0.5mm)
+```
+
+### E. Pattern Instantiation Resolution
+
+When the compiler encounters a `pattern:` or `strategy:` reference:
+1. **Pattern path:** Looks up the `PatternDefinition` in the AST, evaluates step expressions with the provided arguments, and produces an engine `RoutingPattern` (vector of `PatternStep` with resolved nanometer distances and degree angles).
+2. **Strategy path:** Looks up the `StrategyDefinition`, extracts the `target`, `tolerance`, and `pattern` fields, then resolves the pattern instantiation.
+3. The resolved `RoutingPattern` is passed to the `MeanderInjector` for post-route injection.

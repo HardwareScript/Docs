@@ -637,6 +637,219 @@ fn interleave_morton(x: u64, y: u64) -> u64 {
 
 ---
 
+### I. Pattern-Guided Meander Injection (MeanderInjector)
+
+The `MeanderInjector` implements closed-form analytical meander height calculation and polar-to-Cartesian decomposition for post-route pattern injection. It operates in O(N log N + K) time and avoids the $O(B^d)$ state-space explosion of inline pattern-guided A* routing.
+
+```rust
+// crates/hwc-compiler/src/ir/meander_injection.rs
+
+use hwc_engine::geometry_router::routing_patterns::{RoutingPattern, PatternStep};
+use hwc_engine::geometry::Point3D;
+
+pub struct MeanderInjector {
+    trace_width_nm: i64,
+}
+
+impl MeanderInjector {
+    pub fn new(trace_width_nm: i64) -> Self {
+        Self { trace_width_nm }
+    }
+
+    /// Inject meander waypoints into the longest segment of a net's paths.
+    /// Returns expanded paths with meander geometry.
+    pub fn inject_meanders(
+        &self,
+        paths: &[Vec<Point3D>],
+        pattern: &RoutingPattern,
+    ) -> Vec<Vec<Point3D>> {
+        if paths.is_empty() || pattern.steps.is_empty() {
+            return paths.to_vec();
+        }
+
+        // 1. Find longest segment (highest Manhattan length)
+        let (longest_path_idx, longest_seg_idx, max_len) =
+            self.find_longest_segment(paths);
+
+        // 2. Compute total forward distance and repetitions
+        let total_forward: i64 = pattern.steps.iter()
+            .map(|s| {
+                let rad = (s.angle as f64) * std::f64::consts::PI / 180.0;
+                (s.distance as f64 * rad.cos()) as i64
+            })
+            .sum();
+        if total_forward <= 0 { return paths.to_vec(); }
+
+        let repetitions = (max_len / total_forward).max(1) as usize;
+
+        // 3. Decompose pattern into Cartesian waypoints
+        let meander_points = self.decompose_pattern(
+            &paths[longest_path_idx][longest_seg_idx],
+            &paths[longest_path_idx][longest_seg_idx + 1],
+            pattern,
+            repetitions,
+        );
+
+        // 4. Splice meander into path
+        let mut result = paths.to_vec();
+        let mut new_path = result[longest_path_idx].clone();
+        new_path.splice(
+            longest_seg_idx + 1..longest_seg_idx + 1,
+            meander_points,
+        );
+        result[longest_path_idx] = new_path;
+        result
+    }
+
+    /// Closed-form polar-to-Cartesian decomposition
+    fn decompose_pattern(
+        &self,
+        start: &Point3D,
+        end: &Point3D,
+        pattern: &RoutingPattern,
+        repetitions: usize,
+    ) -> Vec<Point3D> {
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let is_vertical = dy.abs() > dx.abs();
+
+        let total_forward: i64 = pattern.steps.iter()
+            .map(|s| {
+                let rad = (s.angle as f64) * std::f64::consts::PI / 180.0;
+                (s.distance as f64 * rad.cos()) as i64
+            })
+            .sum();
+        let half_span = total_forward / 2;
+
+        // Start at center - half_span along segment direction
+        let mut px = if is_vertical { start.x } else { start.x + dx / 2 - half_span };
+        let mut py = if is_vertical { start.y + dy / 2 - half_span } else { start.y };
+        let z = start.z;
+
+        let mut points = vec![Point3D { x: px, y: py, z }];
+
+        for _ in 0..repetitions {
+            for step in &pattern.steps {
+                let rad = (step.angle as f64) * std::f64::consts::PI / 180.0;
+                let forward = (step.distance as f64 * rad.cos()) as i64;
+                let perp = (step.distance as f64 * rad.sin()) as i64;
+
+                if is_vertical {
+                    py += forward;
+                    px += perp;  // perpendicular maps to X for vertical segments
+                } else {
+                    px += forward;
+                    py += perp;  // perpendicular maps to Y for horizontal segments
+                }
+                points.push(Point3D { x: px, y: py, z });
+            }
+        }
+        points
+    }
+
+    fn find_longest_segment(
+        &self,
+        paths: &[Vec<Point3D>],
+    ) -> (usize, usize, i64) {
+        let mut max_len = 0;
+        let mut best = (0, 0, 0);
+        for (pi, path) in paths.iter().enumerate() {
+            for si in 0..path.len().saturating_sub(1) {
+                let len = (path[si + 1].x - path[si].x).abs()
+                    + (path[si + 1].y - path[si].y).abs();
+                if len > max_len {
+                    max_len = len;
+                    best = (pi, si, len);
+                }
+            }
+        }
+        best
+    }
+}
+```
+
+---
+
+### J. 45° Mitered Chamfer Pass (MiterEngine)
+
+The `MiterEngine` scans routed paths for 90° corners and inserts 45° diagonal chamfers at `1.5 × trace_width` distance, maintaining constant characteristic impedance ($Z_0$) through bends.
+
+```rust
+// crates/hwc-engine/src/geometry_router/miter_pass.rs
+
+use crate::geometry::Point3D;
+
+pub struct MiterEngine {
+    trace_width_nm: i64,
+}
+
+impl MiterEngine {
+    pub fn new(trace_width_nm: i64) -> Self {
+        Self { trace_width_nm }
+    }
+
+    /// Apply 45° miter chamfers to all 90° corners in a path.
+    /// Returns expanded path with chamfer points inserted.
+    pub fn apply_miter_pass(&self, path: &[Point3D]) -> Vec<Point3D> {
+        if path.len() < 3 { return path.to_vec(); }
+
+        let miter_dist = (self.trace_width_nm as f64 * 1.5) as i64;
+        let mut result = Vec::with_capacity(path.len());
+
+        result.push(path[0]);
+
+        for i in 1..path.len() - 1 {
+            let prev = &path[i - 1];
+            let curr = &path[i];
+            let next = &path[i + 1];
+
+            // Direction vectors in XY plane
+            let d1x = curr.x - prev.x;
+            let d1y = curr.y - prev.y;
+            let d2x = next.x - curr.x;
+            let d2y = next.y - curr.y;
+
+            // Dot product = 0 means 90° corner (XY only)
+            let dot = d1x * d2x + d1y * d2y;
+            if dot == 0 && (d1x != 0 || d1y != 0) && (d2x != 0 || d2y != 0) {
+                // Normalize direction vectors
+                let len1 = ((d1x * d1x + d1y * d1y) as f64).sqrt();
+                let len2 = ((d2x * d2x + d2y * d2y) as f64).sqrt();
+
+                let nx1 = (d1x as f64 / len1 * miter_dist as f64) as i64;
+                let ny1 = (d1y as f64 / len1 * miter_dist as f64) as i64;
+                let nx2 = (d2x as f64 / len2 * miter_dist as f64) as i64;
+                let ny2 = (d2y as f64 / len2 * miter_dist as f64) as i64;
+
+                // Insert chamfer points before and after corner
+                result.push(Point3D {
+                    x: curr.x - nx1,
+                    y: curr.y - ny1,
+                    z: curr.z,
+                });
+                result.push(Point3D {
+                    x: curr.x + nx2,
+                    y: curr.y + ny2,
+                    z: curr.z,
+                });
+            } else {
+                result.push(*curr);
+            }
+        }
+
+        result.push(*path.last().unwrap());
+        result
+    }
+
+    /// Apply miter pass to multiple paths
+    pub fn apply_to_paths(&self, paths: &[Vec<Point3D>]) -> Vec<Vec<Point3D>> {
+        paths.iter().map(|p| self.apply_miter_pass(p)).collect()
+    }
+}
+```
+
+---
+
 ## 2. Estimated Execution Benchmarks (The "Boot-to-System" Latency Profile)
 
 The following tables show estimated performance benchmarks comparing the legacy voxel architecture (v0.1.7) with the new, continuous, planar-locked vector architecture (v0.1.8) across different design scales.

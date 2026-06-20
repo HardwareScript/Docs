@@ -123,7 +123,87 @@ This gate runs five discrete verification engines:
 
 ---
 
-## 5. Summary of the Integration Flow
+## 5. Two-Phase Post-Route Meander Injection Engine
+
+### 1. Core Abstraction
+Traditional pattern-guided routers embed meander geometry into the A* heuristic during pathfinding. This creates an $O(B^d)$ state-space explosion where $B$ is the branching factor and $d$ is the path depth—the router must evaluate every possible meander placement at every expansion step, causing compile times to scale exponentially on dense boards.
+
+The **Two-Phase Post-Route Meander Injection Engine** resolves this by separating routing from meandering. Phase 1 routes all nets straight (fastest possible A*). Phase 2 analytically injects meander waypoints into the longest segments using closed-form polar decomposition—no iteration, no state-space search.
+
+```
+  Phase 1: Straight Routing              Phase 2: Meander Injection
+  ┌──────────────────────────┐           ┌──────────────────────────────┐
+  │ A* routes all nets       │           │ MeanderInjector scans paths  │
+  │ with zero pattern intent │ ────────► │ Selects longest segment      │
+  │ Fastest possible routing │           │ Decomposes pattern into XY   │
+  └──────────────────────────┘           │ Injects waypoints at midpoint│
+                                         │ Expands 4 pts → 21 pts      │
+                                         └──────────────────────────────┘
+```
+
+### 2. Algorithmic Engine
+The injection engine operates in O(N log N + K) time where N is the number of path segments and K is the number of injected waypoints:
+
+1. **Longest Segment Selection:** For each net with a `route net:` policy, scan all path segments and select the longest one (highest Manhattan length) as the meander insertion point. The midpoint of this segment becomes the meander center.
+
+2. **Closed-Form Meander Height:** Given the total forward distance of the pattern (`total_forward = Σ distance_i × cos(θ_i)`) and the number of repetitions, compute the meander half-span analytically:
+   $$\text{half\_span} = \frac{\text{total\_forward}}{2}$$
+   No iterative trial-and-error is needed.
+
+3. **Polar-to-Cartesian Decomposition:** For each pattern step, decompose the polar vector `(distance, angle)` into Cartesian components relative to the segment's direction:
+   - **Forward component:** $d_x = d \cdot \cos(\theta)$, $d_y = d \cdot \sin(\theta)$ (along segment axis)
+   - **Perpendicular component:** For horizontal segments, perpendicular maps to Y; for vertical segments, perpendicular maps to X. This creates the back-and-forth meander geometry.
+
+4. **Collision Detection:** Before injection, the engine checks whether the meander bounding box (inflated by `trace_width × 2`) intersects any adjacent traces using Minkowski-inflated AABB intersection. If a collision is detected, injection is skipped for that segment (conservative approach—no DRC violations introduced).
+
+5. **Waypoint Splicing:** The original straight segment (2 endpoints) is replaced with the meander path (up to 21 waypoints for 4 Zigzag repetitions). The `EntityGraph` is updated by clearing old segments for the net and re-registering the expanded paths canonically.
+
+### 3. Data Flow & Pipeline Integration
+*   **Input:** Receives straight-routed paths from Phase 1 (AutoRouter::route_space()) and resolved `RoutingPattern` from pattern/strategy instantiation.
+*   **Output:** Generates meandered paths with expanded waypoint counts; syncs to EntityGraph via clear-and-reregister pattern.
+
+---
+
+## 6. 45° Mitered Chamfer Pass (Impedance-Stable Corner Geometry)
+
+### 1. Core Abstraction
+After meander injection, trace paths contain 90° orthogonal corners. At high frequencies (>5 GHz), 90° corners create impedance discontinuities due to excess capacitance at the corner vertex. The **45° Mitered Chamfer Pass** resolves this by inserting diagonal chamfers at every 90° corner, maintaining constant characteristic impedance ($Z_0$) through the bend.
+
+```
+  Before Miter: 90° Corner          After Miter: 45° Chamfer
+  
+       ┌──────                          ┌──────
+       │                                │╲
+       │                                │ ╲  ← 45° diagonal
+       │                                │  ╲    (miter_dist = 1.5 × W)
+       └──────                          └──────
+  
+  Excess capacitance at vertex    Smooth current flow, constant Z₀
+```
+
+### 2. Algorithmic Engine
+The miter engine operates as a post-processing pass on every routed path before AnalyticTrace conversion:
+
+1. **Corner Detection:** Scan consecutive waypoints $(P_{i-1}, P_i, P_{i+1})$. Compute the dot product of direction vectors $\vec{d_1} = P_i - P_{i-1}$ and $\vec{d_2} = P_{i+1} - P_i$ in the XY plane. If $\vec{d_1} \cdot \vec{d_2} = 0$, the corner is exactly 90°.
+
+2. **Miter Distance:** Compute the chamfer insertion distance from the corner vertex:
+   $$\text{miter\_dist} = \text{trace\_width} \times 1.5$$
+   This ratio maintains $Z_0$ continuity for microstrip geometry (IPC-2152 compliant).
+
+3. **Chamfer Point Insertion:** For a 90° corner at $P_i$, insert two new points:
+   - $P_a = P_i - \text{miter\_dist} \times \hat{d_1}$ (along incoming direction)
+   - $P_b = P_i - \text{miter\_dist} \times \hat{d_2}$ (along outgoing direction)
+   Replace the single corner vertex $P_i$ with the sequence $[P_a, P_b]$.
+
+4. **XY-Plane-Only Check:** The dot product is computed ignoring Z differences. A path transitioning between layers (different Z) still gets mitered in the XY projection, since the miter is a 2D copper geometry operation on the routing layer.
+
+### 3. Data Flow & Pipeline Integration
+*   **Input:** Receives meandered (or straight) path waypoint arrays from the MeanderInjector or AutoRouter.
+*   **Output:** Produces mitered paths with 90° corners replaced by 45° chamfer pairs; feeds into AnalyticTrace conversion for lockfile persistence and GLB/DXF export.
+
+---
+
+## 7. Summary of the Integration Flow
 
 By implementing this complete physical synthesis middle-end, your compiler pipeline operates with absolute mathematical and physical correctness:
 
