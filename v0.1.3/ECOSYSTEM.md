@@ -1160,7 +1160,7 @@ AI: *Generates correct .hwsig syntax*
 - GitHub: https://github.com/hwsl-lang
 - Discord: https://discord.gg/G9VBxKpW
 - Twitter: @hwsl_lang
-- Email: hwsl.dev@gmail.com
+- Email: hardwarescript@gmail.com
 
 ---
 
