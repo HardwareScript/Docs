@@ -196,12 +196,12 @@ pub enum Token {
     #[token("false")]       False,
     #[token("const")]       Const,
 
-    // LOGICAL OPERATORS
-    #[token("and")]         And,
-    #[token("or")]          Or,
-    #[token("not")]         Not,
-    #[token("xor")]         Xor,
-    #[token("mod")]         Mod,
+    // LOGICAL OPERATORS (v0.2.1: Boolean Operators for Compile-Time Conditionals)
+    #[token("and")]         And,     // Logical AND: if i == 0 and j == 0
+    #[token("or")]          Or,      // Logical OR: if i == 0 or j == 3
+    #[token("not")]         Not,     // Logical NOT: if not (i == j)
+    #[token("xor")]         Xor,     // Logical XOR (reserved for future use)
+    #[token("mod")]         Mod,     // Modulo operator
 
     // CONTROL FLOW KEYWORDS
     #[token("for")]         For,
@@ -355,6 +355,250 @@ To prevent spatial mathematics from turning HardwareScript into an imperative, s
                               │ Evaluates ONCE to i64   │
                               └─────────────────────────┘
 ```
+
+## 3.0 CRITICAL DISTINCTION: Compile-Time vs Runtime Control Flow
+
+Before diving into the 5 Laws, it is **essential** to understand the fundamental architectural difference between **Runtime Control Flow** (forbidden) and **Compile-Time Generator Conditions** (essential and fully supported):
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ RUNTIME CONTROL FLOW (Forbidden in Physical HDLs)                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • An `if` statement evaluated on the circuit board by electrons            │
+│ • Why it's invalid: Electrons cannot "decide" to change copper to tungsten │
+│   after the chip/PCB is manufactured!                                       │
+│ • Example: A conditional branch in CPU firmware or FPGA logic              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                                      VS.
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ COMPILE-TIME GENERATOR CONDITION (100% Valid v0.2.1 Architecture)         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • An `if` statement evaluated DURING loop unrolling at compile time        │
+│ • How it works:                                                            │
+│   - When row=0, col=0: (0+0)%2 == 0 is TRUE  ──► Emits Aluminum block    │
+│   - When row=0, col=1: (0+1)%2 == 0 is FALSE ──► Emits Tungsten block    │
+│   - Once unrolled, the `if` statement DISAPPEARS COMPLETELY!              │
+│   - The EntityGraph receives a static checkerboard grid of pure geometry   │
+│ • Identical to: C++ `if constexpr`, Rust macros, or OpenSCAD conditionals │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.0.1 Compile-Time `if` Conditionals in `for` Loop Bodies
+
+**Status:** ✅ **Fully Supported in v0.2.1**  
+**Purpose:** Enable parametric geometry generation with conditional branching evaluated at compile time.
+
+When you write `if (row + col) mod 2 == 0` inside a `for` loop:
+1. `row` and `col` are **known compile-time integers** (0, 1, 2, 3, 4)
+2. The compiler evaluates `(row + col) % 2` **at compile time** during loop unrolling
+3. The output generated in the `EntityGraph` is a **completely static, deterministic 3D layout**
+4. **No `if` statement exists on the manufactured board** — it is pure macro generation
+
+#### Example: Checkerboard Pattern Generation
+
+```hardware
+# 5×5 Checkerboard Pyramid - Compile-Time Material Selection
+import * from @std/primitives/units
+import * from "./materials"
+
+space Checkerboard_Test:
+    dimensions: 60.0um by 60.0um by 20.0um
+    resolution: 10nm
+    profile: Thick_3D_Stack
+
+    nets:
+        POWER: { classification: power, potential: 3.3V }
+
+    let block_size = 4.0um
+    let base_offset = 20.0um
+
+    # Generate 5×5 checkerboard base (25 blocks)
+    # Compile-time if/else determines material per block
+    for row in 0..4:
+        for col in 0..4:
+            # ✅ COMPILE-TIME CONDITION: Evaluated during loop unrolling
+            if (row + col) mod 2 == 0:
+                add plane(Aluminum) named L1_R{row}_C{col} on layer: metal1:
+                    shape: SquareCube(size: block_size)
+                    at: [
+                        x: base_offset + col * block_size,
+                        y: base_offset + row * block_size
+                    ]
+                    net: POWER
+            else:
+                add plane(Tungsten) named L1_R{row}_C{col} on layer: metal1:
+                    shape: SquareCube(size: block_size)
+                    at: [
+                        x: base_offset + col * block_size,
+                        y: base_offset + row * block_size
+                    ]
+                    net: POWER
+```
+
+#### What the Compiler Does (Unrolling Process)
+
+```
+LOOP ITERATION: row=0, col=0
+├─ Evaluate: (0 + 0) % 2 == 0  ──► TRUE
+├─ Take `then` branch: Emit Aluminum block at (20.0um, 20.0um)
+└─ AST Node: plane(Aluminum) named "L1_R0_C0" at [20.0um, 20.0um]
+
+LOOP ITERATION: row=0, col=1
+├─ Evaluate: (0 + 1) % 2 == 0  ──► FALSE
+├─ Take `else` branch: Emit Tungsten block at (24.0um, 20.0um)
+└─ AST Node: plane(Tungsten) named "L1_R0_C1" at [24.0um, 20.0um]
+
+LOOP ITERATION: row=0, col=2
+├─ Evaluate: (0 + 2) % 2 == 0  ──► TRUE
+├─ Take `then` branch: Emit Aluminum block at (28.0um, 20.0um)
+└─ AST Node: plane(Aluminum) named "L1_R0_C2" at [28.0um, 20.0um]
+
+... (22 more iterations) ...
+
+FINAL OUTPUT TO ENTITYGRAPH:
+├─ 25 static plane placements (13 Aluminum, 12 Tungsten)
+├─ Zero `if` statements in final geometry
+├─ Zero runtime branching logic
+└─ Pure deterministic checkerboard layout ready for DRC and export
+```
+
+#### Why This is NOT "Imperative Programming"
+
+| Aspect | Imperative Programming (Forbidden) | Compile-Time Generators (Valid) |
+|:---|:---|:---|
+| **Evaluation Time** | Runtime (on manufactured board) | Compile time (during `hwc build`) |
+| **State Mutation** | Variables change after initialization | Immutable once evaluated |
+| **Control Flow Target** | Electrons on silicon | Compiler loop unroller |
+| **Output** | Dynamic circuit behavior | Static geometry database |
+| **Analogy** | C `if (sensor_value > threshold)` | C++ `if constexpr (N > 0)` |
+
+### 3.0.2 Parser & Compiler Implementation
+
+**In `hwc-parser` (AST Construction):**
+```rust
+// In crates/hwc-parser/src/parser/statements.rs
+
+pub(crate) fn parse_for_loop_statement(&mut self) -> Result<Statement, ParseError> {
+    // ... (for loop header parsing) ...
+    
+    while !self.check(&Token::Dedent) && !self.is_at_end() {
+        if self.check(&Token::Add) {
+            body_statements.push(Statement::Placement(self.parse_component_placement()?));
+        } else if self.check(&Token::Route) {
+            body_statements.push(Statement::Route(self.parse_route_statement()?));
+        } else if self.check(&Token::For) {
+            body_statements.push(self.parse_for_loop_statement()?);
+        } else if self.check(&Token::If) {
+            // ✅ v0.2.1: Enable compile-time if/else inside for loops!
+            body_statements.push(self.parse_if_statement()?);
+        } else if self.check(&Token::Let) {
+            body_statements.push(self.parse_let_statement()?);
+        } else {
+            return Err(self.error(
+                "Expected 'add', 'route', 'for', 'if', or 'let' in for loop body"
+            ));
+        }
+    }
+    
+    Ok(Statement::ForLoop { var_name, start, end, body: body_statements })
+}
+
+pub(crate) fn parse_if_statement(&mut self) -> Result<Statement, ParseError> {
+    self.expect(&Token::If)?;
+    let condition = self.parse_expression()?;
+    self.expect(&Token::Colon)?;
+    self.expect(&Token::Newline)?;
+    self.expect(&Token::Indent)?;
+    
+    let mut then_branch = Vec::new();
+    while !self.check(&Token::Dedent) && !self.is_at_end() {
+        // Parse then-branch statements (add, route, for, if, let)
+        // ... (same logic as for-loop body) ...
+    }
+    
+    self.expect(&Token::Dedent)?;
+    
+    // Optional else branch
+    let mut else_branch = Vec::new();
+    if self.check(&Token::Else) {
+        self.advance();
+        self.expect(&Token::Colon)?;
+        self.expect(&Token::Newline)?;
+        self.expect(&Token::Indent)?;
+        
+        while !self.check(&Token::Dedent) && !self.is_at_end() {
+            // Parse else-branch statements
+        }
+        
+        self.expect(&Token::Dedent)?;
+    }
+    
+    Ok(Statement::If { condition, then_branch, else_branch })
+}
+```
+
+**In `hwc-compiler` (Unrolling & Evaluation):**
+```rust
+// In crates/hwc-compiler/src/ir/compilation/placement_loop.rs
+
+impl ParametricUnroller {
+    fn unroll_statement(
+        &mut self,
+        stmt: &Statement,
+        context: &mut EvaluationContext,
+        output_placements: &mut Vec<ComponentPlacement>,
+    ) -> Result<(), CompileError> {
+        match stmt {
+            Statement::Placement(p) => {
+                let resolved = self.evaluate_placement(p, context)?;
+                output_placements.push(resolved);
+            }
+            
+            Statement::ForLoop { var_name, start, end, body } => {
+                let start_val = start.evaluate(context)?.as_integer()?;
+                let end_val = end.evaluate(context)?.as_integer()?;
+                
+                // HardwareScript INCLUSIVE range: 0..4 = [0,1,2,3,4]
+                for i in start_val..=end_val {
+                    context.insert(var_name.clone(), Value::Number(i));
+                    for body_stmt in body {
+                        self.unroll_statement(body_stmt, context, output_placements)?;
+                    }
+                }
+            }
+            
+            Statement::If { condition, then_branch, else_branch } => {
+                // ✅ Evaluate boolean condition at compile time
+                let cond_value = condition.evaluate(context)?;
+                let is_true = match cond_value {
+                    Value::Number(n) => n != 0,
+                    Value::Float(f) => f != 0.0,
+                    Value::Boolean(b) => b,
+                    _ => return Err(CompileError::InvalidConditionType),
+                };
+                
+                // Choose branch and unroll recursively
+                if is_true {
+                    for stmt in then_branch {
+                        self.unroll_statement(stmt, context, output_placements)?;
+                    }
+                } else {
+                    for stmt in else_branch {
+                        self.unroll_statement(stmt, context, output_placements)?;
+                    }
+                }
+            }
+            
+            _ => {}
+        }
+        Ok(())
+    }
+}
+```
+
+---
 
 ### Law 1: Absolute Immutability (No Memory Re-assignment)
 Identifiers defined via `let` or `const` are symbolic aliases. They cannot be mutated or re-assigned.
