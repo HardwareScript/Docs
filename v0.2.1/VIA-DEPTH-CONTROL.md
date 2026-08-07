@@ -64,6 +64,66 @@ HardwareScript provides three levels of depth control with **clear precedence**:
 
 ---
 
+## Physical & Mathematical Precision
+
+HardwareScript uses **pure mathematical expressions** for via depth control. No special keywords—just percentages (0% to 100%) and absolute measurements.
+
+### Why Percentages Are Superior
+
+| Physical Intent | Expression | Z-Coordinate Behavior |
+|:----------------|:-----------|:----------------------|
+| **Surface Contact** | `0%` or `0nm` | Via terminates exactly on layer's top surface (Z = Z_top). Zero penetration. Perfect for printed electronics, 2D materials (graphene), or thick-film deposition. |
+| **Partial Penetration** | `1%` to `99%` or `20nm` to `280nm` | Via penetrates N% down into layer thickness from Z_top. Perfect for silicide contacts, microvias, and diffused junctions. |
+| **Complete Punch-Through** | `100%` | Via penetrates 100% of layer thickness, from Z_top to Z_bottom. Perfect for through-silicon vias (TSVs) and through-hole drilling. |
+
+### Mathematical Continuity
+
+Unlike string keywords, percentages support full arithmetic:
+
+```hardware
+# ✅ Parametric depth calculation
+let base_depth = 50%
+let safety_margin = 5%
+
+add contact(Tungsten) named V1 spanning layer: poly to metal1:
+    diameter: 300nm
+    contact_depth: base_depth + safety_margin    # Evaluates to 55%
+
+# ✅ Mixed absolute and percentage
+add contact(Tungsten) named V2 spanning layer: poly to metal1:
+    diameter: 300nm
+    contact_depth: {
+        lower: 100%         # Full penetration (mathematical)
+        upper: 0% + 20nm    # Surface + 20nm offset
+    }
+```
+
+### Compile-Time Evaluation
+
+All depth expressions evaluate once during semantic lowering:
+
+1. **Lower Layer Depth:**
+   ```
+   ΔZ_lower = Thickness_lower × Depth_lower
+   ```
+   For `lower: 100%` → `ΔZ_lower = 300nm × 1.0 = 300nm`
+
+2. **Upper Layer Depth:**
+   ```
+   ΔZ_upper = Thickness_upper × Depth_upper
+   ```
+   For `upper: 0%` → `ΔZ_upper = 300nm × 0.0 = 0nm`
+
+3. **Via Z-Span:**
+   ```
+   Via_bottom = Z_lower_top - ΔZ_lower
+   Via_top = Z_upper_bottom + ΔZ_upper
+   ```
+
+**Result:** Pure i64 coordinates in picometers, no runtime computation.
+
+---
+
 ## Level 1: Global PDK Default
 
 The simplest approach: one depth value for all vias.
@@ -189,35 +249,49 @@ add contact(Tungsten) named Asymmetric_Via spanning layer: poly to metal1:
     }
 ```
 
-### Special Keywords: `through` and `touch`
+### Special Cases: Full Penetration and Surface Contact
 
-#### `through` - Complete Penetration
+#### Complete Penetration (100%)
 
 ```hardware
 # Via penetrates completely through the lower layer
 add contact(Tungsten) named Through_Via spanning layer: poly to metal1:
     diameter: 300nm
     contact_depth: {
-        lower: through      # 100% through poly layer
+        lower: 100%         # Completely through poly layer
         upper: 25%          # 25% into aluminum
     }
 ```
 
 **Result:** Via starts at Z=0 (bottom of poly) and exits at Z=775nm (25% into aluminum)
 
-#### `touch` - Minimal Contact
+#### Surface Contact (0%)
 
 ```hardware
-# Via barely touches the layer (uses space resolution)
-add contact(Tungsten) named Touch_Via spanning layer: poly to metal1:
+# Via makes surface contact only (no penetration)
+add contact(Tungsten) named Surface_Contact spanning layer: graphene to metal1:
     diameter: 300nm
     contact_depth: {
-        lower: 50%          # 50% into poly
-        upper: touch        # Minimal contact (1 resolution unit)
+        lower: 0%           # Surface contact only (no penetration)
+        upper: 30%          # 30% into aluminum
     }
 ```
 
-**Result:** If `resolution: 10nm`, upper penetration is exactly 10nm
+**Result:** Via sits exactly on top of graphene surface, perfect for 2D materials or printed electronics
+
+#### Minimal Penetration (Absolute)
+
+```hardware
+# Via with minimal fixed penetration
+add contact(Tungsten) named Minimal_Via spanning layer: poly to metal1:
+    diameter: 300nm
+    contact_depth: {
+        lower: 50%          # 50% into poly
+        upper: 10nm         # Exactly 10nm into aluminum
+    }
+```
+
+**Result:** Upper penetration is always 10nm regardless of aluminum thickness
 
 ---
 
@@ -327,7 +401,7 @@ space ProductionChip:
         net: Signal_A
         diameter: 300nm
         contact_depth: {
-            lower: through          # Completely through poly
+            lower: 100%             # Completely through poly
             upper: 25%              # Shallow aluminum penetration
         }
         at: [x: 5.0um, y: 5.0um]
@@ -379,6 +453,68 @@ profile NewStyle:
 - Adapts to varying layer thicknesses
 - Material-specific behavior
 - Per-instance overrides when needed
+
+---
+
+## Common Use Cases
+
+### Use Case 1: Printed Electronics (0% Depth)
+
+For additive manufacturing where vias are printed/deposited on surface:
+
+```hardware
+profile PrintedElectronicsPDK:
+    via:
+        contact_depth: 0%    # All vias sit on surface (no etching)
+        material_contact_depths:
+            Graphene: 0%     # 2D material, no penetration
+            Silver: 5%       # Slight penetration for adhesion
+            Copper: 10%      # Moderate penetration
+```
+
+### Use Case 2: Through-Silicon Vias (100% Depth)
+
+For TSVs that penetrate completely through substrate layers:
+
+```hardware
+profile TSV_PDK:
+    stackup:
+        substrate:  [material: Silicon, thickness: 50um, routable: false]
+        metal1:     [material: Copper, thickness: 1um, routable: true]
+    
+    via:
+        contact_depth: {
+            lower: 100%      # Completely through substrate (TSV)
+            upper: 30%       # Partial penetration into metal
+        }
+```
+
+### Use Case 3: Hybrid Process (Mixed Depths)
+
+Different materials require different penetration strategies:
+
+```hardware
+profile HybridProcessPDK:
+    via:
+        contact_depth: 50%    # Default
+        material_contact_depths:
+            Graphene: 0%            # Surface contact only
+            Aluminum: 25%           # Shallow etch
+            Polysilicon: 80%        # Deep etch for ohmic contact
+            Silicon_N: 100%         # Full punch-through
+```
+
+### Use Case 4: Microvia Stacks (Graduated Depths)
+
+For HDI PCBs with laser-drilled microvias:
+
+```hardware
+profile MicroviaPDK:
+    via:
+        contact_depth: 33%           # Laser microvias (shallow)
+        min_contact_depth: 10nm      # Minimum etch depth
+        max_contact_depth: 50nm      # Maximum to prevent over-etch
+```
 
 ---
 
@@ -454,9 +590,10 @@ HINT: Reduce via.contact_depth (currently 75%) or adjust layer thicknesses.
 |:-----------|:--------|:--------|
 | **Percentage** | `50%` | 50% of layer thickness (adapts to each layer) |
 | **Absolute** | `150nm` | Exact depth in nanometers (fixed for all layers) |
-| **Through** | `through` | 100% penetration through entire layer |
-| **Touch** | `touch` | Minimal contact (1 resolution unit, e.g., 10nm) |
+| **Full Penetration** | `100%` | 100% penetration through entire layer |
+| **Surface Contact** | `0%` | No penetration (surface contact only) |
 | **Asymmetric** | `{ lower: 75%, upper: 33% }` | Different depths for lower vs upper layer |
+| **Mixed** | `{ lower: 100%, upper: 10nm }` | Combine percentage and absolute values |
 
 ---
 
@@ -464,6 +601,7 @@ HINT: Reduce via.contact_depth (currently 75%) or adjust layer thicknesses.
 
 HardwareScript v0.2.1 via depth control provides:
 
+✅ **Pure mathematical expressions:** `0%` to `100%` (no keywords)  
 ✅ **Simple default:** `contact_depth: 50%`  
 ✅ **Material-aware:** Different depths per material  
 ✅ **Instance override:** Fix problematic vias  
@@ -472,6 +610,15 @@ HardwareScript v0.2.1 via depth control provides:
 ✅ **Zero new syntax:** Uses existing expression system  
 ✅ **Compile-time only:** No runtime computation  
 ✅ **ASIC-focused:** Designed for IC fabrication needs  
+✅ **Parametric math:** `0% + 20nm`, `base_depth * 1.2` all work  
+
+### Key Design Principles
+
+1. **Mathematical Continuity:** `0%` = surface, `100%` = through—no special keywords
+2. **Expression Arithmetic:** Full support for `+`, `-`, `*`, `/`, `mod` operations
+3. **Zero Token Pollution:** No new reserved words; `through` can be a signal name
+4. **Physical Precision:** Direct mapping to Z-coordinates and layer boundaries
+5. **Compile-Time Safety:** All depths resolve to fixed i64 values before synthesis  
 
 ---
 

@@ -213,6 +213,343 @@ These parameters depend on:
 
 ---
 
+## 1.6. PDK Subcircuit Support (v0.3.0+)
+
+### Purpose
+Support **foundry-provided SPICE subcircuits** with explicit terminal contracts and zero compiler magic.
+
+### Problem Statement
+
+Foundry PDKs (SkyWater SKY130, TSMC, Intel) provide SPICE subcircuits with **more terminals than the device's physical structure**:
+
+```spice
+.subckt sky130_fd_pr__res_high_po PLUS MINUS BULK W=1u L=1u
+    RR_head PLUS node_1 362ohm
+    RR_body node_1 node_2 {350ohm * (L/W)}
+    RR_tail node_2 MINUS 362ohm
+    CC_sub1 PLUS BULK {2fF * W * L}
+    CC_sub2 MINUS BULK {2fF * W * L}
+.ends
+```
+
+**Key Observation**: The subcircuit has **3 terminals** (PLUS, MINUS, BULK), but a resistor only has **2 physical terminals** (A, B) in the layout.
+
+### Zero Compiler Magic Solution
+
+**OLD (WRONG) Approaches:**
+- ❌ Auto-connect BULK to GND (hidden assumption - GND might not exist!)
+- ❌ Auto-detect substrate pours (magic inference)
+- ❌ Hardcode terminal mapping in compiler
+
+**NEW (CORRECT) Approach:**
+- ✅ User explicitly declares ALL terminals in device definition
+- ✅ User explicitly binds ALL terminals in layout (including virtual ones)
+- ✅ Compiler fails loudly if ANY terminal is missing
+
+### Device Definition with Subcircuit
+
+```hw
+device Resistor:
+    terminals: [A, B, BULK]           # ALL 3 terminals declared
+    materials:
+        A: Polysilicon                # Physical terminal
+        B: Polysilicon                # Physical terminal
+        BULK: Air                     # Virtual terminal (no physical pour)
+    spice:
+        prefix: X                     # X for subcircuit calls
+        subcircuit: sky130_fd_pr__res_high_po  # PDK subcircuit name
+        terminal_order: [A, B, BULK]  # Explicit order for SPICE
+        parameters: [W, L]            # Geometry parameters
+        parameter_style: named        # Named parameters for subcircuits
+```
+
+### Layout Binding with Virtual Terminal
+
+```hw
+space Simple_Resistor:
+    nets:
+        In:  { classification: signal }
+        Out: { classification: signal }
+        GND: { classification: ground }   # ← Explicit ground net declaration
+    
+    # Physical terminal A
+    add pour(Polysilicon) named Resistor_Body_A:
+        device: R1.A
+        net: In
+        dimensions: 2um by 1um
+    
+    # Physical terminal B
+    add pour(Polysilicon) named Resistor_Body_B:
+        device: R1.B
+        net: Out
+        dimensions: 2um by 1um
+    
+    # Virtual terminal BULK - no physical geometry needed
+    add pour(Air) named Resistor_Bulk:
+        device: R1.BULK
+        net: GND                      # ← User explicitly chooses net
+        dimensions: 1nm by 1nm        # Minimal footprint
+```
+
+### Generated SPICE Output
+
+```spice
+* ========================================
+* PDK SUBCIRCUIT: sky130_fd_pr__res_high_po
+* ========================================
+.subckt sky130_fd_pr__res_high_po PLUS MINUS BULK W=1u L=1u
+    RR_head PLUS node_1 362ohm
+    RR_tail node_2 MINUS 362ohm
+    RR_body node_1 node_2 {350ohm * (L / W)}
+    CC_sub1 PLUS BULK {2fF * W * L}
+    CC_sub2 MINUS BULK {2fF * W * L}
+.ends sky130_fd_pr__res_high_po
+
+* ========================================
+* EXTRACTED DEVICES
+* ========================================
+XR1 In Out GND sky130_fd_pr__res_high_po W=1.41u L=1.41u
+```
+
+### Fail-Loudly Error Handling
+
+If the user forgets to bind BULK:
+
+```
+❌ UNBOUND DEVICE TERMINAL
+
+Device 'R1' (type: Resistor) requires terminal 'BULK' in its SPICE terminal_order.
+
+Required terminals: ["A", "B", "BULK"]
+Available bindings: ["A", "B"]
+
+💡 FIX: Add an explicit binding in your layout:
+
+   add pour(Air) named R1_Bulk on layer: polyres:
+       device: R1.BULK
+       net: GND  # or VSS, AVSS, SUBSTRATE, etc.
+
+📖 Zero Compiler Magic: HardwareScript never guesses terminal connections.
+   Every terminal must be explicitly declared by the user.
+```
+
+### Why This Approach?
+
+#### ❌ What We DON'T Do (And Why)
+
+**Approach 1: Auto-connect BULK to GND**
+```rust
+// WRONG - Hidden magic!
+if terminal == "BULK" && !device.terminals.contains("BULK") {
+    netlist.push_str(" GND");  // Assumes GND exists!
+}
+```
+
+**Problems:**
+- Net GND might not exist (could be VSS, AGND, DGND, AVSS, 0, SUBSTRATE)
+- Silent short circuits (high-voltage substrates to ground)
+- Fails at tapeout when foundry expects different net name
+
+**Approach 2: Auto-detect substrate pours**
+```rust
+// WRONG - Inference magic!
+if let Some(substrate_pour) = find_substrate_pour_near_device(device) {
+    netlist.push_str(&substrate_pour.net);  // Guesses connection!
+}
+```
+
+**Problems:**
+- Which substrate pour if multiple exist?
+- What if device is intentionally floating?
+- Layout changes silently affect netlist
+
+#### ✅ What We DO (And Why)
+
+**Explicit Terminal Contract**
+```hw
+device Resistor:
+    terminals: [A, B, BULK]  # User declares ALL terminals
+```
+
+**Explicit Net Binding**
+```hw
+add pour(Air) named R1_Bulk:
+    device: R1.BULK
+    net: GND  # User explicitly chooses net
+```
+
+**Benefits:**
+- 🎯 **100% deterministic** - same layout always generates same netlist
+- 🔍 **Fully visible** - every connection explicit in source code
+- 🚨 **Fail-fast** - missing terminal caught at compile time, not simulation
+- 🌍 **Portable** - works with any foundry's net naming conventions
+
+### Subcircuit vs. Model Card
+
+| Aspect | `.model` Card | `.subckt` Definition |
+|--------|--------------|---------------------|
+| **Purpose** | Simple device physics | Complex circuit equivalent |
+| **Example** | Diode IS/N/RS | Multi-resistor + capacitor network |
+| **Parameters** | Physics constants | Geometry + calculated values |
+| **Terminals** | 2-4 (device pins) | Any number (internal nodes) |
+| **SPICE Prefix** | Device letter (D, M, Q) | X (subcircuit call) |
+
+### Subcircuit Definition Syntax
+
+```hw
+subcircuit sky130_fd_pr__res_high_po:
+    terminals: [PLUS, MINUS, BULK]
+    parameters: [W = 1.0um, L = 1.0um]
+    elements:
+        R_head: Resistor(nodes: [PLUS, node_1], value: 362.0ohm)
+        R_tail: Resistor(nodes: [node_2, MINUS], value: 362.0ohm)
+        R_body: Resistor(nodes: [node_1, node_2], value: 350.0ohm * (L / W))
+        C_sub1: Capacitor(nodes: [PLUS, BULK], value: 2.0fF * W * L)
+        C_sub2: Capacitor(nodes: [MINUS, BULK], value: 2.0fF * W * L)
+```
+
+**Compiler Output:**
+```spice
+.subckt sky130_fd_pr__res_high_po PLUS MINUS BULK W=1u L=1u
+    RR_head PLUS node_1 362ohm
+    RR_tail node_2 MINUS 362ohm
+    RR_body node_1 node_2 {350ohm * ({L / W})}
+    CC_sub1 PLUS BULK {{2fF * W} * L}
+    CC_sub2 MINUS BULK {{2fF * W} * L}
+.ends sky130_fd_pr__res_high_po
+```
+
+### When to Use Subcircuits
+
+**Use Subcircuits When:**
+- ✅ Foundry provides `.subckt` definitions (SkyWater SKY130)
+- ✅ Device has parasitics modeled as R/C networks
+- ✅ Multi-terminal devices (3+ terminals)
+- ✅ Temperature-dependent behavior via subcircuit parameters
+
+**Use Model Cards When:**
+- ✅ Simple 2-terminal devices (diodes)
+- ✅ Standard SPICE models (LEVEL 1/3 MOSFETs)
+- ✅ Compact physics equations
+
+### Real-World Example: SkyWater SKY130 P+ Poly Resistor
+
+**Foundry Spec:**
+- Device: `sky130_fd_pr__res_high_po`
+- Sheet resistance: ~350 Ω/□
+- End contact resistance: ~362 Ω each
+- Substrate capacitance: ~2 fF/μm²
+
+**HardwareScript Implementation:**
+
+```hw
+# PDK provides subcircuit definition
+subcircuit sky130_fd_pr__res_high_po:
+    terminals: [PLUS, MINUS, BULK]
+    parameters: [W = 1.0um, L = 1.0um]
+    elements:
+        R_head: Resistor(nodes: [PLUS, node_1], value: 362.0ohm)
+        R_tail: Resistor(nodes: [node_2, MINUS], value: 362.0ohm)
+        R_body: Resistor(nodes: [node_1, node_2], value: 350.0ohm * (L / W))
+        C_sub1: Capacitor(nodes: [PLUS, BULK], value: 2.0fF * W * L)
+        C_sub2: Capacitor(nodes: [MINUS, BULK], value: 2.0fF * W * L)
+
+# User creates device wrapper
+device Resistor:
+    terminals: [A, B, BULK]
+    materials:
+        A: Polysilicon
+        B: Polysilicon
+        BULK: Air
+    spice:
+        prefix: X
+        subcircuit: sky130_fd_pr__res_high_po
+        terminal_order: [A, B, BULK]
+        parameters: [W, L]
+        parameter_style: named
+```
+
+**Layout:**
+```hw
+space My_Circuit:
+    nets:
+        In:  { classification: signal }
+        Out: { classification: signal }
+        VSS: { classification: ground }  # Foundry uses VSS for substrate
+    
+    add pour(Polysilicon) named R1_TermA:
+        device: R1.A
+        net: In
+        dimensions: 4um by 1um
+    
+    add pour(Polysilicon) named R1_TermB:
+        device: R1.B
+        net: Out
+        dimensions: 4um by 1um
+    
+    add pour(Air) named R1_Bulk:
+        device: R1.BULK
+        net: VSS  # User chooses substrate net name
+        dimensions: 1nm by 1nm
+```
+
+**Generated SPICE:**
+```spice
+.subckt sky130_fd_pr__res_high_po PLUS MINUS BULK W=1u L=1u
+    RR_head PLUS node_1 362ohm
+    RR_tail node_2 MINUS 362ohm
+    RR_body node_1 node_2 {350ohm * ({L / W})}
+    CC_sub1 PLUS BULK {{2fF * W} * L}
+    CC_sub2 MINUS BULK {{2fF * W} * L}
+.ends sky130_fd_pr__res_high_po
+
+XR1 In Out VSS sky130_fd_pr__res_high_po W=4.0u L=1.0u
+```
+
+### Design Principles for Subcircuit Support
+
+1. **Explicit Terminal Contracts** - All terminals declared in device definition
+2. **User-Controlled Net Binding** - User chooses which net connects to each terminal
+3. **Virtual Terminals Allowed** - Air material for non-physical terminals
+4. **Fail-Loudly on Missing Terminals** - Clear error with fix instructions
+5. **Zero Hidden Assumptions** - No auto-GND, no inference, no magic
+
+### Migration from Flat Resistors
+
+**Before (Flat Resistor):**
+```hw
+device Resistor:
+    terminals: [A, B]
+    spice:
+        prefix: R
+        terminal_order: [A, B]
+        parameters: [R]
+        parameter_style: positional
+
+# Output: RR1 In Out 1400.00
+```
+
+**After (PDK Subcircuit):**
+```hw
+device Resistor:
+    terminals: [A, B, BULK]  # Add BULK terminal
+    spice:
+        prefix: X            # Change to X
+        subcircuit: sky130_fd_pr__res_high_po
+        terminal_order: [A, B, BULK]
+        parameters: [W, L]   # Change from R to W, L
+        parameter_style: named
+
+# Layout must add:
+add pour(Air) named R1_Bulk:
+    device: R1.BULK
+    net: GND
+
+# Output: XR1 In Out GND sky130_fd_pr__res_high_po W=4.0u L=1.0u
+```
+
+---
+
 ## 2. Device Definitions with Geometry vs. Model Parameters
 
 ### Resistor (Geometry-Derived)
