@@ -671,29 +671,28 @@ HardwareScript's three abstraction tiers remain cleanly defined, with v0.2.1 emp
                                       │
                                       ▼ lowers to
  ┌─────────────────────────────────────────────────────────────────────────┐
- │ TIER 3: LOW-LEVEL (Bare-Metal Assembly & Absolute Escape Hatch)        │
- │ • `absolute:` block for raw picometer coordinates                       │
+ │ TIER 3: LOW-LEVEL (Bare-Metal Assembly & Explicit Coordinates)         │
+ │ • Direct `at: [x: ..., y: ...]` coordinates in picometers              │
  │ • Exact physical placement without auto-solvers                         │
  │ • All physical DRC checks remain 100% active                            │
  └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 4.1 Low-Level Syntax (Bare Metal / Assembly)
-* **Keyword:** `absolute:`
+* **Syntax:** Direct coordinate specification with `at: [x: ..., y: ...]`
 * **Role:** Uncompromised physical control. Bypasses layout solvers and auto-routers.
-* **Coordinate Model:** Absolute coordinates in picometers (`pm`), micrometers (`um`), or millimeters (`mm`).
+* **Coordinate Model:** Explicit coordinates in picometers (`pm`), micrometers (`um`), or millimeters (`mm`).
 
 ```hardware
-# Low-Level Bare-Metal Placement
+# Low-Level Bare-Metal Placement (Direct Coordinates)
 space Silicon_Die:
-    resolution: 1nm
     profile: Silicon_180nm
 
-    absolute:
-        add plane(Aluminum) named M1_Pad on layer: metal1:
-            shape: Rectangle(1000nm, 1000nm)
-            at: [x: 5000nm, y: 5000nm, z: 960nm]
-            net: VDD
+    # Direct placement with explicit coordinates (no wrapper needed)
+    add plane(Aluminum) named M1_Pad on layer: metal1:
+        shape: Rectangle(1000nm, 1000nm)
+        at: [x: 5000nm, y: 5000nm, z: 960nm]
+        net: VDD
 ```
 
 ### 4.2 Middle-Level Syntax (Relational & Parameterized)

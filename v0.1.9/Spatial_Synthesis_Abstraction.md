@@ -17,7 +17,7 @@ To ensure the HardwareScript compilation pipeline is built upon an uncompromised
 With this low-level core securely in place, we can now introduce **high-level spatial abstractions** [10-WIRING-INTEGRATION-GAPS.md]. These abstractions free both human developers and code-generation models (LLMs) from the burden of manual coordinate arithmetic [12-ERROR-SYSTEM-OVERHAUL.md]. This document defines the syntax, keywords, compiler lowering mechanisms, and integration paths for:
 1.  **The Middle-Level (Relational & Parameterized) Syntax**
 2.  **The High-Level (Declarative & Constraint-Driven) Syntax**
-3.  **The Bare-Metal Escape Hatch (`absolute:`)**
+3.  **Direct Coordinate Placement (No Wrapper Needed)**
 
 ---
 
@@ -212,16 +212,15 @@ The compiler executes the high-level declarative constraints through a closed-lo
 
 ---
 
-# Section 3: The Escape Hatch (`absolute:`)
+# Section 3: Direct Coordinate Placement (No Wrapper Needed)
 
 While higher-level abstractions are essential for development velocity, physical hardware eventually confronts raw physical boundaries (e.g., custom RF matching, analog standard-cell gates, high-voltage clearances) where the compiler's auto-solvers must be bypassed.
 
-The **`absolute:`** block acts as the explicit, opt-in bare-metal escape hatch of HardwareScript [Architectural-Specification.md]. It is the spatial equivalent of Rust's `unsafe` or `asm!` blocks. Inside this block, the compiler suspends all automatic layout, boundary-docking, and alignment solvers, allowing the designer (or LLM) to write raw, uncompromised picometer coordinate paths directly.
+**Direct coordinate specification** with `at: [x: ..., y: ...]` acts as the explicit, opt-in bare-metal escape hatch of HardwareScript [Architectural-Specification.md]. It is the spatial equivalent of Rust's `unsafe` or `asm!` blocks. When you specify explicit coordinates, the compiler suspends all automatic layout, boundary-docking, and alignment solvers, allowing the designer (or LLM) to write raw, uncompromised picometer coordinate paths directly.
 
 ```hardware
-# Using the absolute: escape hatch inside a high-level space
+# Using direct coordinates for precise control (no wrapper needed)
 space Mixed_Signal_SoC:
-    resolution: 1nm
     profile: Silicon_250nm
 
     # High-level relational placements
@@ -229,26 +228,26 @@ space Mixed_Signal_SoC:
     add RF_Transceiver named Radio right_of CPU with spacing: 1.0mm
 
     # ========================================================================
-    # THE ESCAPE HATCH: Suspends auto-solvers for uncompromised control
+    # DIRECT COORDINATE PLACEMENT: Bypasses auto-solvers for precise control
     # ========================================================================
-    absolute:
-        # 1. Paint custom copper shielding to exact coordinates
-        add pour(Copper) named RF_Shield_Trace on layer: metal1:
-            boundary: [x: 450000pm, y: 300000pm] to [x: 455000pm, y: 800000pm]
-            
-        # 2. Force a manual routing path with explicit 3D waypoints
-        route Radio.RF_OUT to Antenna_Port:
-            width: 150nm
-            layer: metal1
-            path: [
-                [450000pm, 300000pm],
-                [450000pm, 800000pm]
-            ]
+    
+    # 1. Paint custom copper shielding to exact coordinates
+    add pour(Copper) named RF_Shield_Trace on layer: metal1:
+        boundary: [x: 450000pm, y: 300000pm] to [x: 455000pm, y: 800000pm]
+        
+    # 2. Force a manual routing path with explicit 3D waypoints
+    route Radio.RF_OUT to Antenna_Port:
+        width: 150nm
+        layer: metal1
+        path: [
+            [450000pm, 300000pm],
+            [450000pm, 800000pm]
+        ]
 ```
 
-### 3.1 Compiler Behavior Inside the `absolute:` Block
-*   **Auto-Solver Suspension:** When the parser encounters `absolute:`, the layout constraint solver and Topological AutoRouter are suspended for all statements within that block.
+### 3.1 Compiler Behavior With Direct Coordinates
+*   **Auto-Solver Suspension:** When explicit coordinates are provided (`at: [x: ..., y: ...]`), the layout constraint solver and Topological AutoRouter are suspended for those statements.
 *   **Direct Picometer Mapping:** Component placements and manual route `path` coordinates are mapped directly to the `EntityGraph` using 64-bit picometers, bypassing the relative transform step [01-DATABASE-SPATIAL-FOUNDATION.md].
-*   **Active Verification (No Safety Sacrifice):** While layout and routing auto-solvers are suspended, **physical verification remains 100% active** [13-PHYSICAL-SYNTHESIS-GUARDRAILS.md]. The G-Cell sweep-line DRC, the PIVB connectivity solver, and the Sakurai parasitic extractor still analyze the manual geometry [PHYSICAL-SYNTHESIS-MIDDLE-END-SPEC.md, PIVB-Solver.md]. If a manual coordinate in the `absolute:` block violates clearance rules or creates a short circuit, the compiler halts the build immediately with a specific violation code [15-DRC-SIMPLIFICATION.md].
+*   **Active Verification (No Safety Sacrifice):** While layout and routing auto-solvers are suspended, **physical verification remains 100% active** [13-PHYSICAL-SYNTHESIS-GUARDRAILS.md]. The G-Cell sweep-line DRC, the PIVB connectivity solver, and the Sakurai parasitic extractor still analyze the manual geometry [PHYSICAL-SYNTHESIS-MIDDLE-END-SPEC.md, PIVB-Solver.md]. If a manual coordinate violates clearance rules or creates a short circuit, the compiler halts the build immediately with a specific violation code [15-DRC-SIMPLIFICATION.md].
 
 This guarantees that you can write bare-metal physical code when necessary without sacrificing the safety and correctness of the overall design.

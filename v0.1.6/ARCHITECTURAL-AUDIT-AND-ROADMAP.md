@@ -776,10 +776,9 @@ space CMOS_Inverter:
     add NMOS named M1
     add PMOS named M2 above M1
     
-    # Low-level escape for fine-tuning
-    absolute:
-        add pour(Aluminum) named Shield:
-            boundary: [x: 450.5nm, y: 300nm] to [x: 455.5nm, y: 800nm]
+    # Direct coordinate placement for fine-tuning (no wrapper needed)
+    add pour(Aluminum) named Shield:
+        boundary: [x: 450.5nm, y: 300nm] to [x: 455.5nm, y: 800nm]
 ```
 
 **Verdict**: Provides the escape hatch without forcing everyone to use it.
