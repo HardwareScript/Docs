@@ -1,8 +1,8 @@
 # Device Definitions in HardwareScript
 
 **Version:** 0.2.1  
-**Status:** Implementation Complete, SPICE Extraction In Progress  
-**Date:** 2026-08-03
+**Status:** Implementation Complete, Multi-Pour Terminal Support  
+**Date:** 2026-08-10
 
 ---
 
@@ -72,6 +72,23 @@ device NMOS:
 ## Device Instantiation: Binding Pours to Terminals
 
 Devices are instantiated by binding geometry (pours) to device terminals using the `device:` field.
+
+**Key Feature: Multiple Pours Per Terminal**
+
+A single terminal can have **multiple pours bound to it**. This is essential for real-world devices where one terminal includes both:
+1. **Primary channel material** (e.g., Polysilicon resistor body)
+2. **Contact materials** (e.g., Titanium Silicide or Aluminum pads)
+
+### Multi-Terminal Binding Syntax
+
+Bind multiple terminals to a single pour using comma-separated syntax:
+
+```hw
+add pour(Polysilicon) named Resistor_Body on layer: polyres:
+    device: R1.A, R1.B  # ← Both terminals bound to this pour
+    net: In
+    dimensions: 4.0um by 1.0um
+```
 
 ### Step 2: Create Geometry for Each Terminal
 
