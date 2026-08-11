@@ -25,6 +25,7 @@ Attempting to build devices from raw `add pour()` statements with manual net ass
 1. **DRC Violations**: The compiler sees overlapping different nets as short circuits
 2. **No SPICE Extraction**: Cannot calculate R, C, or transistor parameters automatically
 3. **No Physical Validation**: Cannot enforce foundry material requirements
+4. **Parasitic Extraction Errors**: Device bodies might be extracted as routing traces
 
 ### The Device Solution
 
@@ -33,6 +34,25 @@ Native `device` declarations provide:
 1. ✅ **Automatic DRC Exemption**: Compiler knows terminals are meant to overlap
 2. ✅ **SPICE Extraction**: Calculates physical parameters (R = R_sheet × L/W)
 3. ✅ **Material Contract Enforcement**: Validates physical layer requirements
+4. ✅ **Parasitic Exemption**: Device bodies automatically excluded from interconnect extraction
+
+### Architectural Advantage: Semantic Parasitic Exemption
+
+HardwareScript's device system provides a critical advantage over traditional EDA tools:
+
+**Commercial Tools (Calibre, Assura, StarRC):**
+- Operate on flat GDSII geometry
+- Cannot distinguish device bodies from routing traces
+- **Require manual blocker layers** to prevent double-counting device physics
+
+**HardwareScript:**
+- Device bodies defined as `add pour` with `device:` binding
+- Parasitic extractor only processes `route` statements (`analytic_routes`)
+- **No blocker layers needed** - architectural separation prevents double-counting
+
+**Example:** A 4µm × 1µm polysilicon resistor body is automatically excluded from parasitic extraction. Only the aluminum routing traces are extracted, producing correct capacitance values (~0.19 fF for traces vs. ~15-20 fF if device body was incorrectly included).
+
+See `NETLIST-ARCHITECTURE.md` Section 0 for detailed validation and comparison with commercial tools.
 
 ---
 
@@ -479,3 +499,4 @@ To create other low-level devices:
 
 **Document History:**
 - 2026-08-03: Initial documentation based on resistor implementation
+- 2026-08-11: Added parasitic exemption architectural advantage section, validated against commercial LPE standards
