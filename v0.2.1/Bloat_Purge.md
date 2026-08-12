@@ -96,6 +96,169 @@ The `last` keyword (`after: last.right + 1mm`) is deleted. Loop-based spatial po
 
 ---
 
+## Category 3.5: Case Study — The `overlap:` Keyword That Never Was
+
+```
+                  AVOIDED BLOAT: THE OVERLAP: KEYWORD TRAP
+                  
+  ❌ PROPOSED (Almost Added to v0.2.1):      ✅ ACTUAL SOLUTION (Zero New Syntax):
+  add pour(Aluminum) named In_Pad:           add pour(Aluminum) named In_Pad:
+      dimensions: 1.0um by 1.0um                 dimensions: 1.0um by 1.0um
+      overlap: Contact_A by 300nm on West        align: right with Contact_A.left + 300nm
+      net: In                                    align: center_y with Contact_A
+                                                 net: In
+```
+
+### 3.5.1 The Problem: P41 Physical Continuity Violations
+
+When designing custom device geometries (resistors, capacitors, inductors), designers encountered this build error:
+
+```
+❌ PHYSICAL CONTINUITY VIOLATIONS - Cannot proceed to parameter validation:
+P41 (Net 'In' has 2 disconnected conductive components): 
+XY-plane gap detected between components on net 'In'.
+X-gap: 550 nm, Y-gap: 0 nm.
+```
+
+**Root Cause:** Pads and contacts were touching edge-to-edge (0 nm overlap). Clipper2's 2D Boolean Union requires **area intersection** (at least 1 pm²) to weld polygons into a single conductive island.
+
+### 3.5.2 The Initial Reflex: Add a New Keyword
+
+The first instinct was to add native `overlap:` syntax:
+
+```hardware
+# ❌ BLOAT TRAP: Adding a new mid-level keyword
+add pour(Aluminum) named In_Pad:
+    overlap: Contact_A_Metal by 300nm on West
+    align: center_y with Contact_A_Metal
+```
+
+This would have required:
+- New `Overlap` token in `tokens.rs`
+- New `RelationalConstraint::Overlap` AST variant
+- New overlap resolver in semantic lowering
+- Yet another special-case spatial preposition
+
+**The Fatal Flaw:** Every time we encounter a new physical layout pattern, we'd add another keyword (`touch:`, `stagger:`, `interlock:`), falling right back into **Syntax Whack-a-Mole**.
+
+### 3.5.3 The Brutal Question: "Can This Be Expressed With What Already Exists?"
+
+Before implementing, we asked:
+> "Does the existing `align:` system + Comptime Anchor Arithmetic already support this?"
+
+**Answer:** YES! The infrastructure was already complete:
+1. ✅ `align:` statements already accept **edge axes** (`left`, `right`, `top`, `bottom`)
+2. ✅ Anchor properties (`.left`, `.right`, `.center_x`) already parse and resolve
+3. ✅ Expression arithmetic (`+ 300nm`, `- 200nm`) already works in alignment targets
+4. ✅ The relational resolver already lowers edge alignment to exact center positions
+
+### 3.5.4 The Zero-Bloat Solution
+
+Instead of adding `overlap:`, we simply **enabled edge axis alignment** in the parser:
+
+```rust
+// BEFORE (Limited axis support):
+let axis = match axis_name.as_str() {
+    "center" => AlignmentAxis::Center,
+    "x" => AlignmentAxis::X,
+    "y" => AlignmentAxis::Y,
+    "z" => AlignmentAxis::Z,
+    _ => return Err(self.error("Expected: center, x, y, or z"))
+};
+
+// AFTER (Edge axis support - zero new tokens!):
+let axis = match axis_name.as_str() {
+    "center" => AlignmentAxis::Center,
+    "x" | "center_x" => AlignmentAxis::X,
+    "y" | "center_y" => AlignmentAxis::Y,
+    "z" | "center_z" => AlignmentAxis::Z,
+    "left" => AlignmentAxis::Left,        // ← Already in AlignmentAxis enum
+    "right" => AlignmentAxis::Right,      // ← Already in AlignmentAxis enum
+    "top" => AlignmentAxis::Top,          // ← Already in AlignmentAxis enum
+    "bottom" => AlignmentAxis::Bottom,    // ← Already in AlignmentAxis enum
+    _ => return Err(self.error("Expected: center, x, y, z, left, right, top, or bottom"))
+};
+```
+
+**Result:** Full overlap control with **ZERO new syntax keywords**, **ZERO new tokens**, and **ZERO bloat**.
+
+### 3.5.5 Comparison: What We Avoided
+
+| Aspect | Adding `overlap:` Keyword | Using `align:` Edge Axes |
+|:---|:---|:---|
+| **New Tokens in `tokens.rs`** | ❌ +1 Token (`Overlap`) | ✅ **0 Tokens** |
+| **AST Complexity** | ❌ New `RelationalConstraint::Overlap` variant | ✅ **0 AST changes** (Reused `Align`) |
+| **Semantic Resolver** | ❌ New overlap-specific lowering pass | ✅ **0 changes** (Edge alignment already implemented) |
+| **Language Footprint** | ❌ Adds syntax bloat | ✅ **Reduces code** (7 characters fewer: `overlap:` vs `align:`) |
+| **Generality** | ⚠️ Handles overlap only | ✅ **Handles gaps, flush edges, and bounds too** |
+| **Mathematical Proof** | ✅ 300nm penetration | ✅ **Same: 300nm penetration** |
+
+### 3.5.6 The Universal Pattern
+
+This demonstrates the architectural principle that **must be applied before adding any new syntax**:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ BLOAT PREVENTION CHECKLIST (Before Adding New Syntax)              │
+├─────────────────────────────────────────────────────────────────────┤
+│ 1. Can this be expressed with existing anchor arithmetic?          │
+│ 2. Can this be expressed with existing align: constraints?         │
+│ 3. Can this be expressed with comptime expressions?                │
+│ 4. Would this add a single-purpose keyword that only handles       │
+│    one specific layout pattern?                                    │
+│ 5. If answered YES to #1-3, STOP. Use existing infrastructure.     │
+│ 6. If answered YES to #4, REJECT. This is Syntax Whack-a-Mole.     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.5.7 Production Example: Before & After
+
+**❌ BEFORE (Manual center math - error-prone):**
+```hardware
+let pad_size = 1.0um
+
+add pour(Aluminum) named In_Pad on layer: metal1:
+    dimensions: pad_size by pad_size
+    at: [x: Contact_A_Metal.left - pad_size / 2, y: Contact_A_Metal.center_y]
+    net: In
+```
+
+**✅ AFTER (Edge-to-edge alignment - declarative & correct):**
+```hardware
+let pad_size = 1.0um
+let overlap = 300nm
+
+add pour(Aluminum) named In_Pad on layer: metal1:
+    dimensions: pad_size by pad_size
+    align: right with Contact_A_Metal.left + overlap  # Right edge penetrates left edge by 300nm
+    align: center_y with Contact_A_Metal
+    net: In
+```
+
+**Math Verification:**
+```
+In_Pad.right = Contact_A_Metal.left + 300nm
+In_Pad.center_x = In_Pad.right - (pad_size / 2) = Contact_A_Metal.left + 300nm - 500nm
+In_Pad.left = In_Pad.center_x - (pad_size / 2) = Contact_A_Metal.left - 200nm
+
+Result: 300nm guaranteed 2D area penetration ✅
+```
+
+### 3.5.8 Key Takeaway
+
+**Before adding ANY new mid-level syntax keyword, ask: "Can existing infrastructure already express this?"**
+
+In this case, the answer was YES, saving the language from:
+- 1 new token
+- 1 new AST variant
+- 1 new semantic lowering pass
+- Future maintenance burden
+- Syntax bloat accumulation
+
+This is the **Bloat Purge Philosophy** in action: **ruthlessly question every proposed addition before it becomes technical debt**.
+
+---
+
 ## Category 4: The User-Space Anti-Pattern Purge
 
 ### 4.1 Elimination of $1\text{nm}$ `Air` Pours for Virtual SPICE Terminals
