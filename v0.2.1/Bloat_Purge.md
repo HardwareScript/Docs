@@ -14,13 +14,15 @@ HardwareScript is guided by an uncompromising philosophy: **when a feature or su
 
 During early compiler stages (v0.1.2–v0.2.0), several temporary hacks, ghost keywords, and workaround patterns were introduced. As HardwareScript evolved into a $i64$ picometer continuous vector engine with Salsa-driven query memoization and Comptime Anchor Arithmetic, these early hacks mutated into **user-facing bloat and dual-authority bugs**.
 
-This specification executes a workspace-wide **Bloat Purge** across six core categories:
+This specification executes a workspace-wide **Bloat Purge** across eight core categories:
 1. **Space Block Purge:** Deletion of `origin:`, deletion of `resolution:`, and removal of $Z$-depth from `dimensions:`.
 2. **Ghost Block Purge:** Deletion of the unused `absolute:` block wrapper.
 3. **Lexer Token Purge:** Removal of 22+ hardcoded preposition/directional tokens from `Token` enum in favor of context-aware identifier parsing.
 4. **User-Space Anti-Pattern Purge:** Elimination of $1\text{nm}$ `Air` dummy pours for SPICE virtual terminals, elimination of physical resistor body splitting, and replacement of 35-line pour assemblies with 1-line PCell instantiations.
 5. **Material Definition Purge:** Eradication of quoted symbols (`symbol: "Poly"`) and absurd mandatory fields (`process: deposited` on `Air`).
 6. **Solder Mask Hardcoding Purge:** Deletion of hardcoded solder mask fields from `StackupManager` and migration to pure data-driven stackup layers for universal PCB/ASIC/Flex/RF support.
+7. **Placement Loop AST Construction Purge:** Eradication of 90 lines of manual AST Expression tree synthesis (`Expression::Binary` node boxing) in `placement_loop.rs` for `PlacementItem::Pour`, computing bounds directly in integer picometers.
+8. **Contact Position & Relational Anchor Purge:** Eradication of the superseded `relational_anchor` field (`RelationalAnchor`, `AnchorPoint`), purge of ghost deferral early-returns in `place_contact`, and unification of coordinate extraction around `align:` / `with:` (Comptime Anchor Math).
 
 **Note:** Routing cost weights (`via_penalty`, `direction_penalty`, `crosstalk_penalty`, `reference_void_penalty`) are **NOT bloat**. They are declarative policy parameters protected by the Zero-Magic Compiler Mandate. They must remain fully exposed in PDK `.hw` files to allow foundry-specific tuning and Connection Interface Routing (CIR) intent differentiation.
 
@@ -460,6 +462,48 @@ When a component pad or via is placed on an outer conductive layer (e.g. `top_cu
 
 ---
 
+## Category 7: The Placement Loop AST Construction Purge
+
+```
+                   THE PLACEMENT LOOP AST PURGE
+                   
+  BEFORE (v0.2.1 Early):                    AFTER (v0.2.1+ Purged):
+  // 90 lines of AST expression boxing       // Direct picometer bounds in place_pour:
+  new_from = center - width / 2              resolved_pour.position = Some(pos);
+  new_to   = center + width / 2              resolved_pour.boundary = None;
+  // (Synthesized fake recursive AST)        resolved_pour.relational_constraints = smallvec![];
+```
+
+### 7.1 Eradication of 90-Line Manual AST Boxing in `execute_placement`
+* **Reason for Purge:** When a pour's relational constraints were resolved into an integer picometer center position (`resolved_position`), `PlacementItem::Pour` in `placement_loop.rs` previously synthesized 90 lines of fake recursive AST `hwc_parser::Expression::Binary` nodes wrapped in `Box::new` just to construct updated `Rect(from, to)` coordinate bounds. This created massive AST allocation overhead, memory fragmentation, and redundant expression evaluation passes.
+* **Action:** The 90-line manual AST expression synthesis was completely deleted. When relational constraints are resolved, `resolved_pour.position` is set to `Some(resolved_position)`, `resolved_pour.boundary` is set to `None`, and `resolved_pour.relational_constraints` is cleared. `place_pour` then evaluates center coordinates and dimensions directly into $i64$ picometers without AST re-boxing.
+
+---
+
+## Category 8: The Contact Position & Relational Anchor Purge
+
+```
+                THE RELATIONAL ANCHOR & DEFERRAL PURGE
+                
+  BEFORE (v0.2.0 - v0.2.1):                 AFTER (v0.2.1+ Purged):
+  pub struct ContactPlacement {             pub struct ContactPlacement {
+      pub position: Option<Coordinate>,         pub position: Option<Coordinate>,
+      pub relational_anchor: Option<...>, #❌   pub from_elevation: Elevation,
+  }                                         }
+  // Early return Ok(()) in place_contact:   // No early return; position resolved
+  // ❌ Prevented bbox registration!         // and entity registered in bbox_tracker!
+```
+
+### 8.1 Removal of Superseded `relational_anchor`
+* **Reason for Purge:** Early contact implementations used a dedicated `relational_anchor` field (`RelationalAnchor`, `AnchorPoint`) for region-relative positioning (e.g. `Region.center`). With the introduction of Comptime Anchor Arithmetic (`align: center with Region`, `align: right with Contact_A.left + 300nm`), `relational_anchor` became redundant bloat that created four competing ways to resolve a contact's position.
+* **Action:** The `relational_anchor` field, `RelationalAnchor` struct, `AnchorPoint` enum, and `resolve_relational_anchor()` function were purged across `hwc-parser` and `hwc-compiler`. Contact positioning is unified around `position` (`at:`) and `align:` / `with:` constraints.
+
+### 8.2 Eradication of the "Ghost Deferral Guard" Bug
+* **Reason for Purge:** In `place_contact.rs`, a legacy guard checked `if !contact.relational_constraints.is_empty() { return Ok(()); }`. Because `execute_placement` resolved relational constraints for contacts without clearing the `relational_constraints` list (unlike pours), `place_contact` entered this guard and early-returned `Ok(())` before reaching `bbox_tracker.register("Via_Up")`. When subsequent entities (e.g. `Via_Down`) attempted to align to `Via_Up.center_x`, the lookup failed with `error[R17]: Anchor 'Via_Up' not found`.
+* **Action:** `execute_placement` now clears `relational_constraints` after resolution, and `place_contact`'s premature early-exit guard was eliminated, ensuring all contacts are placed and registered in `bbox_tracker` deterministically.
+
+---
+
 ## Section 8: Before & After Code Transformation
 
 To demonstrate the power of the Bloat Purge, consider the complete transformation of `variable_resistor_test.hw` from **250 lines of bloated boilerplate** down to **~35 lines of pure declarative hardware truth**.
@@ -593,6 +637,8 @@ space Geometry_Variable_Resistor_Space implements GeometryVariableResistor:
 | **PDK Profile** | 15 internal pathfinding weights | Physical stackup & rules ONLY | Clean API separation between engine and PDK |
 | **Material Definitions**| Quoted symbols (`"Poly"`), `Air: process: deposited` | Bare identifiers (`Poly`), optional process | 100% grammar compliance with no logical contradictions |
 | **Solder Mask** | Hardcoded 20µm in `StackupManager` Rust code | Explicit stackup layer in `.hw` PDK | Universal support: PCB/ASIC/Flex/RF domains |
+| **AST Tree Synthesis** | 90 lines of boxed `Expression::Binary` trees | Direct picometer bounds in `place_pour` | Zero runtime AST re-boxing allocation overhead |
+| **Relational Anchors** | `relational_anchor` field & ghost deferral guard | Unified `align:` / `with:` & bbox registration | Eliminated `error[R17]` anchor bugs & competing position paths |
 
 **Document Status:** Approved for Core Implementation  
 **Version:** v0.2.1+ (Canonical Reference)  
