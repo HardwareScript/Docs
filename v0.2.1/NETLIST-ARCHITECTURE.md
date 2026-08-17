@@ -140,73 +140,78 @@ The netlist system translates physical hardware layouts into SPICE circuit descr
 
 ---
 
-## 0. Architectural Advantage: Semantic Parasitic Exemption
+## 0. Intent-Driven Extraction Model: Device Exemption vs. Interconnect Pours
 
 ### The Commercial EDA Problem
 
-Traditional flat GDSII extractors (Mentor Calibre, Cadence Assura, Synopsys StarRC) suffer from a fundamental limitation: they operate on **geometric primitives** after all semantic information is lost. By the time parasitic extraction runs, the tool cannot distinguish between:
+Traditional flat GDSII extractors (Mentor Calibre, Cadence Assura, Synopsys StarRC) operate on **geometric primitives** after all semantic information is lost. By the time parasitic extraction runs, the tool cannot distinguish between:
 - A polysilicon routing trace (should be extracted)
 - A polysilicon resistor body (should NOT be extracted - already modeled by foundry `.subckt`)
 
 **Standard Solution:** Users must manually draw **blocker layers** (extraction exemption masks) over every device body to prevent double-counting.
 
-### HardwareScript's Architectural Superiority
+### HardwareScript's Intent-Driven Extraction Architecture
 
-HardwareScript's parasitic extractor operates on **semantic object hierarchies**, not flat geometry:
+HardwareScript's parasitic extractor operates on **semantic object hierarchies and intent bindings**, distinguishing between:
+1. **Device Bodies** (`device:` binding) $\rightarrow$ Exempted from parasitic extraction because their physics ($R_{\text{body}}$, $C_{\text{sub}}$) are fully modeled by foundry `.subckt` compact models.
+2. **Interconnect Pours & Planes** (unbound conductive pours carrying `net:`, like `GND_Bus` or `li1` straps) $\rightarrow$ Extracted for distributed sheet resistance ($R_s$) and substrate capacitance ($C_{\text{gnd}}$).
+3. **Analytic Routes** (`route A to B`) $\rightarrow$ Extracted for series resistance ($R_{\text{tr}}$), microstrip substrate capacitance ($C_{\text{gnd}}$), and **lateral sidewall coupling capacitance ($C_c$)** between adjacent parallel traces.
+4. **Spatial Via Stacks** (`contact`) $\rightarrow$ Clustered by XY coordinates into independent physical columns to calculate parallel via resistance ($R_{\text{via}}$).
 
-```rust
-// Parasitic extraction scope (hwc-export/src/netlist/parasitics.rs)
-for route in &space.analytic_routes {
-    // Extract trace R/C using Sakurai/Wheeler
-}
-// Pours are NEVER processed by extractor
+```
+                       INTENT-DRIVEN EXTRACTION
+                        ┌───────────────────┐
+                        │   Layout Object   │
+                        └─────────┬─────────┘
+                                  │
+         ┌────────────────────────┼────────────────────────┐
+         ▼                        ▼                        ▼
+ ┌───────────────┐        ┌───────────────┐        ┌───────────────┐
+ │ Device-Bound  │        │ Interconnect  │        │ Analytic      │
+ │ Pour          │        │ Pour / Bus    │        │ Route         │
+ │ (device: ...) │        │ (net: ..., no │        │ (route ...)   │
+ └───────┬───────┘        │  device: ...) │        └───────┬───────┘
+         │                └───────┬───────┘                │
+         ▼                        ▼                        ▼
+  Exempt from R/C         Extract 2D/Mesh R        Extract 1D R,
+  (Foundry .subckt)       + Distributed Cgnd       Cgnd + Lateral Cc
 ```
 
-**Key Architectural Separation:**
-- **`add pour`** statements → Device bodies, filled regions, geometric primitives
-- **`route A to B`** statements → Interconnect wiring stored in `analytic_routes`
+### Extraction Scope Matrix
 
-**Result:**
-- ✅ Device bodies (pours) automatically excluded from extraction
-- ✅ Only actual interconnect traces extracted
-- ✅ No blocker layers needed
-- ✅ Zero risk of double-counting device physics
+| Layout Element | Binding / Classification | Extracted Parasitics | Why? |
+|---|---|---|---|
+| **Resistor Channel** (`R1_Body`) | `device: R1.A, R1.B` | **Exempt (0 R, 0 C)** | Modeled by `.subckt sky130_fd_pr__res_high_po` |
+| **Interconnect Strap** (`li1` pour) | `net: Mid` (no device binding) | **$R_s \cdot L/W$, $C_{\text{gnd}}$** | High sheet resistance ($12.5\,\Omega/\square$) must not be shorted |
+| **Power Bus / Plane** (`GND_Bus`) | `net: GND` (no device binding) | **$R_{\text{bus}}$ (mesh), $C_{\text{gnd}}$** | Captures real IR drop between taps along wide conductive pours |
+| **Signal Traces** (`metal1` routes) | `net: In`, `net: Mid`, `net: GND` | **$R_{\text{tr}}$, $C_{\text{gnd}}$, $C_c$** | Models interconnect delay, trace IR drop, and mutual crosstalk |
+| **Via Arrays** (`contact`) | `net: ...`, `pdiff` $\to$ `li1` $\to$ `metal1` | **$R_{\text{single}} / N$** | Spatially clustered per landing coordinate ($n_{\text{layer}}$) |
 
-### Validation: Mathematical Proof
+### Modular Parasitic Extraction Pipeline (`hwc-export::netlist::parasitics`)
 
-**Test Case:** 4µm × 1µm polysilicon resistor with aluminum routing
+The extraction engine is organized into focused, single-responsibility modules operating on typed domain primitives rather than ad-hoc string heuristics:
 
-**If extractor double-counted the resistor body:**
-- Expected parasitic: ~15-20 fF (microstrip capacitance of 4µm² polysilicon)
-
-**Actual SPICE output:**
-```spice
-CCgnd_In_0 In GND 1.933755e-16  # 0.19 fF
+```
+crates/hwc-export/src/netlist/parasitics/
+├── types.rs        # Domain primitives: PourRole, RouteEndpoint, ExtractedClusterNode, SpatialCluster
+├── geometry.rs     # Pure geometric & stackup lookups: dielectric detection, containment, centroids
+├── via_stacks.rs   # Stage 1: Spatial via clustering & parallel contact resistance (Rvia)
+├── routes.rs       # Stage 2: Series trace resistance (Rtr) & microstrip ground capacitance
+├── coupling.rs     # Stage 3: 2.5D lateral coupling capacitance (Cc) between parallel traces
+├── pours.rs        # Stage 4: Conductive bus mesh sheet resistance (Rbus) & substrate capacitance
+├── terminals.rs    # Stage 5: Intent-driven device terminal mapping to physical interface nodes
+└── mod.rs          # Extraction orchestrator (build_physical_netlist_graph)
 ```
 
-**Source of 0.19 fF:**
-The 2.5µm × 300nm aluminum trace connecting the pad to the resistor:
-```hardware
-route In_Pad to Contact_A_Metal:
-    net: In
-    width: 300nm
-    layer: metal1
-```
+#### Core Domain Types
 
-Sakurai microstrip formula over SiO₂ dielectric → **0.19 fF** ✅
-
-**Conclusion:** The extractor correctly ignores device pours and only processes routing traces. The architecture inherently prevents the double-counting bug that requires blocker layers in commercial tools.
-
-### Comparison Table
-
-| Tool | Extraction Input | Device Exemption | Blocker Layers Required? |
-|------|------------------|------------------|-------------------------|
-| **Mentor Calibre xRC** | Flat GDSII polygons | Manual exemption masks | ✅ Yes |
-| **Cadence Quantus** | Flat GDSII polygons | Manual exemption masks | ✅ Yes |
-| **Synopsys StarRC** | Flat GDSII polygons | Manual exemption masks | ✅ Yes |
-| **HardwareScript** | Semantic objects (routes vs pours) | Architectural separation | ❌ No |
-
-**Design Principle:** This architectural advantage is not an implementation detail—it's a core design feature that makes HardwareScript's extraction inherently more robust than tools operating on flattened geometry.
+1. **`PourRole`**: Explicit classification of layout polygons:
+   - `ExternalPad { net }`: External test pad or boundary port carrying the top-level net.
+   - `DeviceTerminal { device, terminal }`: Physical landing head bound to a compact model terminal.
+   - `InterconnectStrap`: Localized internal metal head.
+   - `PowerBus { net }`: Wide power or ground bus plane.
+2. **`RouteEndpoint`**: Strongly-typed endpoint resolution (`Pad`, `ViaCluster`, `TraceJunction`), eliminating string-guessing and preventing open circuits.
+3. **`ExtractedClusterNode`**: Coordinate-anchored spatial cluster node (`n{net}_{layer}_{cluster_idx}`) preserving distributed line resistance across wide layout spans.
 
 ---
 
@@ -415,18 +420,18 @@ space Simple_Resistor:
 * ========================================
 * PDK SUBCIRCUIT: sky130_fd_pr__res_high_po
 * ========================================
-.subckt sky130_fd_pr__res_high_po PLUS MINUS BULK W=1u L=1u
-    RR_head PLUS node_1 362ohm
-    RR_tail node_2 MINUS 362ohm
-    RR_body node_1 node_2 {350ohm * (L / W)}
-    CC_sub1 PLUS BULK {2fF * W * L}
-    CC_sub2 MINUS BULK {2fF * W * L}
+.subckt sky130_fd_pr__res_high_po A B BULK W=1u L=1u
+    RR_head A node_1 362
+    RR_tail node_2 B 362
+    RR_body node_1 node_2 {3.500000e2 * (L / W)} tc1=-0.00147 tc2=0.0000027 vc1=-0.00032 vc2=0.000018
+    CC_sub1 A BULK {2.000000e-15 * W * L}
+    CC_sub2 B BULK {2.000000e-15 * W * L}
 .ends sky130_fd_pr__res_high_po
 
 * ========================================
 * EXTRACTED DEVICES
 * ========================================
-XR1 In Out GND sky130_fd_pr__res_high_po W=1.41u L=1.41u
+XR1 nIn_li1 nMid_li1_0 nGND_pdiff_0 sky130_fd_pr__res_high_po W=1.41u L=4.00u
 ```
 
 ### Fail-Loudly Error Handling
@@ -869,7 +874,108 @@ Missing terminal → **compilation error** with clear message.
 
 ---
 
+## 4.5. Channel Continuity Validation
+
+### Purpose
+
+After all pours are bound to device terminals, the compiler runs a **topological integrity check** to verify that the physical geometry actually forms the continuous conductive path the designer intended. This is the final gate between geometry binding and parameter extraction.
+
+This catches open-circuit failures that are **syntactically valid but physically broken** — for example, a serpentine loop where the programmer's `for` loop generated one fewer vertical connector than required.
+
+### Opt-In via Binding Semantics (Zero New Tokens)
+
+Channel continuity verification is not a global flag or a new keyword. It is driven entirely by the existing `device:` binding syntax, using the number of terminals declared on a single pour:
+
+| Pour Binding | Declared Semantics | Continuity Check |
+|---|---|---|
+| `device: R1.A, R1.B` | Shared conduction body — this pour connects two terminals | **Enabled.** Compiler validates that `A` can reach `B` through the physical geometry. |
+| `device: C1.c0` | Isolated plate — this pour is a single terminal endpoint | **Disabled.** Compiler does not enforce a DC path to any other terminal. |
+
+This is the same principle that distinguishes routing traces (path must connect two endpoints) from isolated pours (plane exists independently).
+
+### Implementation: `DeviceTopologyValidator`
+
+Located in `crates/hwc-export/src/device_extractor/continuity.rs`.
+
+```
+DeviceTopologyValidator::validate(device, terminal_pours, space)
+│
+├─ extract_conduction_terminals()
+│    └─ Scans all pours for BindingPriority::Channel with ≥2 terminals
+│         • Multi-terminal pour (R1.A, R1.B) → conduction terminals = [A, B]
+│         • Single-terminal pour (C1.c0)     → returns []  (skips validation)
+│
+├─ DeviceChannelGraph::build(terminal_pours, conduction_terminals, space)
+│    ├─ Nodes = all pours + via plugs connected to the device
+│    └─ Edges = 3D AABB intersection between pairs of nodes
+│
+└─ DeviceChannelGraph::analyze(conduction_terminals)
+     ├─ Union-Find (Disjoint Set Forest) on edges
+     ├─ Locates entry node for each terminal's contact pour
+     └─ Reports disconnected pairs → ChannelContinuityReport
+```
+
+### Error Diagnostics
+
+When continuity fails, the compiler reports the exact fragmentation:
+
+```
+Invalid geometry for Resistor 'R1': Device channel fragmentation:
+  Disconnected Terminal Pairs: 'A' ↮ 'B'
+  The channel geometry is fragmented into 2 disjoint islands (open circuit).
+    • Island 1: Bulk_Tap_Diff, Seg0, Seg1, Seg2, Seg3, Vert0, Vert1, Vert2, Contact_A_LI
+    • Island 2: Seg4, Contact_B_LI
+```
+
+### Examples
+
+#### Channel-Based Device (Resistor) — Opted In
+
+The user writes `device: R1.A, R1.B` on channel pours:
+
+```hw
+# Serpentine resistor body — multi-terminal = shared channel
+for i in 0..5:
+    add pour(Polysilicon) named Seg{i} on layer: polyres:
+        device: R1.A, R1.B        # ← declares shared conduction body
+        net: In
+        ...
+
+for i in 0..4:                    # ← must be N-1 connectors for N segments
+    add pour(Polysilicon) named Vert{i} on layer: polyres:
+        device: R1.A, R1.B
+        net: In
+        ...
+```
+
+**Compiler checks**: Is `A`'s contact pour in the same connected island as `B`'s contact pour?
+- `0..4` → 4 connectors for 5 segments → all joined → ✅ passes.
+- `0..3` → 3 connectors → `Seg4` is isolated → ❌ open circuit caught.
+
+#### Electrostatic Device (Capacitor) — Opted Out
+
+The user writes one terminal per pour:
+
+```hw
+# Top plate — single-terminal = isolated physical plate
+add pour(CAPM) named Top_Plate on layer: capm:
+    device: C1.c0                 # ← single terminal, not a shared body
+    net: VDD
+    ...
+
+# Bottom plate — separate plate, also single-terminal
+add pour(Aluminum) named Bottom_Plate on layer: metal1:
+    device: C1.c1                 # ← single terminal
+    net: GND
+    ...
+```
+
+**Compiler checks**: `extract_conduction_terminals` returns `[]` because no pour declares ≥2 terminals. Continuity validation is **skipped entirely**. Capacitor plates are correctly treated as isolated conductors separated by a dielectric.
+
+---
+
 ## 5. Parameter Extraction
+
 
 ### Purpose
 Calculate device parameters from physical geometry and material properties.
@@ -1242,28 +1348,41 @@ R_total = R_single / N
 
 ### Extraction Algorithm
 
-#### Step 1: Group Contacts by Via Stack
+#### Step 1: Spatial Clustering of Contacts into Via Stacks
 
-Contacts are grouped by **(net, from_layer, to_layer)** to identify via stacks connecting the same two layers:
+Contacts are **spatially clustered** per net using XY coordinates (single-linkage clustering, threshold ~2.0µm) rather than grouped globally. This guarantees that geographically distinct via arrays and substrate taps remain isolated electrical columns instead of being falsely lumped into artificial super-shorts:
 
 ```rust
-// Group via stacks
-let mut via_stacks: FxHashMap<(String, String, String), Vec<ContactMetadata>> = FxHashMap::default();
+// 1. Group contacts by net
+let mut contacts_by_net: FxHashMap<String, Vec<&ContactMetadata>> = FxHashMap::default();
+// ...
 
-for contact in &space.contacts {
-    if let (Some(net), Some(from), Some(to)) = (&contact.net, &contact.from_layer, &contact.to_layer) {
-        let key = (net.clone(), from.clone(), to.clone());
-        via_stacks.entry(key).or_default().push(contact);
-    }
+// 2. Spatially cluster contacts on each net into independent physical columns
+let clusters = cluster_contacts_spatially(&net_contacts, VIA_CLUSTER_RADIUS_NM);
+
+// 3. For each spatial cluster, group contacts by layer transition (from_layer -> to_layer)
+for (cluster_idx, cluster_contacts) in clusters.into_iter().enumerate() {
+    // ...
 }
 ```
 
 **Example grouping:**
 ```
-("In", "polyres", "li1")   → [Via_A_Poly_0, Via_A_Poly_1, Via_A_Poly_2]  # 3 vias
-("In", "li1", "metal1")    → [Via_A_Metal_0, Via_A_Metal_1, Via_A_Metal_2]  # 3 vias
-("Out", "polyres", "li1")  → [Via_B_Poly_0, Via_B_Poly_1, Via_B_Poly_2]  # 3 vias
-("GND", "pdiff", "li1")    → [Bulk_Tap_Contact]  # 1 via
+Net "In"  - Cluster 0 (X=2.8µm, Y=5.0µm):
+    ("polyres", "li1")  → [Internal to XR1 subcircuit RR_head macro]    # Exempt (prevents double-counting)
+    ("li1", "metal1")   → [Via_A_Metal_0, Via_A_Metal_1, Via_A_Metal_2] # 3 routing vias in parallel (14.7Ω)
+
+Net "Mid" - Cluster 0 (X=7.2µm, Y=5.0µm, R1 Terminal B):
+    ("polyres", "li1")  → [Internal to XR1 subcircuit RR_tail macro]    # Exempt
+    ("li1", "metal1")   → [R1_Via_B_Metal_0, R1_Via_B_Metal_1, ...]      # 3 routing vias in parallel (14.7Ω)
+
+Net "GND" - Cluster 0 (X=5.0µm, Y=7.5µm, R1 Bulk Tap):
+    ("pdiff", "li1")    → [R1_Bulk_Tap_Contact]                         # 1 tap via (44.1Ω)
+    ("li1", "metal1")   → [R1_Bulk_Tap_Via]                             # 1 tap via (44.1Ω)
+
+Net "GND" - Cluster 1 (X=12.0µm, Y=7.5µm, R2 Bulk Tap):
+    ("pdiff", "li1")    → [R2_Bulk_Tap_Contact]                         # 1 tap via (44.1Ω)
+    ("li1", "metal1")   → [R2_Bulk_Tap_Via]                             # 1 tap via (44.1Ω)
 ```
 
 #### Step 2: Calculate Parallel Resistance
@@ -1289,16 +1408,20 @@ let total_via_resistance = single_via_resistance / (num_vias as f64);
 
 #### Step 3: Insert Parasitic Resistor
 
-Via resistance is modeled as a **series resistor** in the netlist:
+Via resistance is modeled as a **series resistor** in the netlist connecting distinct physical layer nodes:
 
 ```rust
-if total_via_resistance > 0.1 {  // Only extract if significant (>0.1Ω)
-    let via_name = format!("via_{}_{}_{}", net_name, from_layer, to_layer);
+if total_via_resistance > 0.001 {
+    let via_name = if total_clusters == 1 {
+        format!("via_{}_{}_{}", net_name, from_layer, to_layer)
+    } else {
+        format!("via_{}_{}_{}_{}", net_name, from_layer, to_layer, cluster_idx)
+    };
     
     graph.parasitics.push(ParasiticElement::TraceResistor {
         name: via_name.clone(),
-        node_a: net_name.clone(),                        // Logical net
-        node_b: format!("{}_post_{}", net_name, via_name),  // Post-via node
+        node_a: node_a.clone(),
+        node_b: node_b.clone(),
         value_ohms: total_via_resistance,
     });
 }
@@ -1324,69 +1447,78 @@ for i in 0..3:
 * ========================================
 * INTEGRATED TRACE PARASITICS
 * ========================================
-* Trace resistance (aluminum routing)
-RRtr_In_0 nIn_entry In 6.527778e-1
-
-* Ground capacitance
-CCgnd_In_0 In GND 1.726567e-16
-
-* Via/Contact resistance (polyres → li1, 3 vias in parallel)
-Rvia_In_polyres_li1 In In_post_via_In_polyres_li1 1.468558e1
-
 * Via/Contact resistance (li1 → metal1, 3 vias in parallel)
-Rvia_In_li1_metal1 In In_post_via_In_li1_metal1 1.468558e1
+Rvia_In_li1_metal1 nIn_metal1 nIn_li1 1.468558e1
 
-* Via/Contact resistance (pdiff → li1, 1 via)
-Rvia_GND_pdiff_li1 GND GND_post_via_GND_pdiff_li1 4.405673e1
+* Via/Contact resistance (Mid contacts)
+Rvia_Mid_li1_metal1_0 nMid_metal1_0 nMid_li1_0 1.468558e1
+Rvia_Mid_li1_metal1_1 nMid_metal1_1 nMid_li1_1 1.468558e1
+
+* Via/Contact resistance (GND bulk taps and output)
+Rvia_GND_li1_metal1_0 nGND_metal1_0 nGND_li1_0 4.405673e1
+Rvia_GND_pdiff_li1_0 nGND_li1_0 nGND_pdiff_0 4.405673e1
+Rvia_GND_li1_metal1_1 nGND_metal1_1 nGND_li1_1 4.405673e1
+Rvia_GND_pdiff_li1_1 nGND_li1_1 nGND_pdiff_1 4.405673e1
+Rvia_GND_li1_metal1_2 nGND_metal1_2 nGND_li1_2 1.468558e1
+
+* Distributed Trace resistance (aluminum routing)
+Rtr_Mid_0_0 Mid nMid_metal1_tr0_seg1 2.611111e-1
+Rtr_Mid_0_1 nMid_metal1_tr0_seg1 Mid 5.222222e-2
+Rtr_GND_1_0 nGND_metal1_2 nGND_metal1_tr1_seg1 5.222222e-1
+Rtr_GND_1_1 nGND_metal1_tr1_seg1 nGND_metal1_tr1_seg2 2.872222e-1
+Rtr_GND_1_2 nGND_metal1_tr1_seg2 GND 6.527778e-1
+
+* Distributed Interconnect Bus sheet resistance (aluminum GND_Bus)
+Rbus_GND_Bus_0 nGND_metal1_0 nGND_metal1_1 9.138889e-1
 ```
 
 **Analysis:**
-- **Trace resistance**: 0.65Ω (aluminum routing)
+- **Trace resistance**: 1.46Ω distributed along the ground return route
+- **Bus sheet resistance**: 0.91Ω along the GND_Bus between R1 and R2 bulk taps
 - **Via resistance (3 parallel)**: 14.7Ω each stack
-- **Via resistance (1 via)**: 44.1Ω (bulk tap)
-- **Total parasitic In → Out**: ~31Ω (via resistance dominates!)
+- **Via resistance (1 via)**: 44.1Ω (bulk taps)
 
 ### Comparison: Before vs. After
 
-| Metric | Before (Missing Via R) | After (With Via R) | Error |
-|--------|----------------------|-------------------|-------|
-| **Trace R (In)** | 0.65Ω | 0.65Ω | — |
-| **Via R (polyres→li1)** | **0Ω** ❌ | **14.7Ω** ✅ | ∞% |
-| **Via R (li1→metal1)** | **0Ω** ❌ | **14.7Ω** ✅ | ∞% |
-| **Total Parasitic** | 0.65Ω | **30.0Ω** ✅ | **46×** |
-| **1kΩ Resistor Error** | 0.07% | **3.0%** ✅ | **43× worse** |
-
-**Conclusion:** Omitting via resistance causes **severe underestimation** of parasitic resistance, especially critical for precision analog circuits.
+| Metric | Before (Star-Collapsed) | After (Spatial & Distributed) | Error in Star Topology |
+|--------|------------------------|------------------------------|------------------------|
+| **Bus IR Drop** | **0.00V (Bypassed)** ❌ | **Real $\Delta V = I \cdot R_{\text{bus}}$** ✅ | 100% loss of bus degradation |
+| **Via Landing Nodes** | **Collapsed to Star Node** ❌ | **Spatial Nodes ($n_{\text{metal1}}$)** ✅ | Trace R bypassed |
+| **Thermal Drift (TCR)** | **0 ppm/°C (Linear)** ❌ | **-1470 ppm/°C (`tc1`/`tc2`)** ✅ | Unrealistic flat response |
 
 ### Node Topology
 
-**Entry Point Architecture with Via Resistance:**
+**Spatial Distributed Node Architecture:**
 
 ```
-Stimulus Source (V_In)
-    ↓
-Pad Entry Node (nIn_entry)
-    ↓
-[Trace Resistance: RRtr_In_0 = 0.65Ω]
-    ↓
-Logical Net Node (In)
-    ↓
-[Via Resistance 1: Rvia_In_polyres_li1 = 14.7Ω]
-    ↓
-Post-Via Node 1 (In_post_via_In_polyres_li1)
-    ↓
-[Via Resistance 2: Rvia_In_li1_metal1 = 14.7Ω]
-    ↓
-Post-Via Node 2 (In_post_via_In_li1_metal1)
-    ↓
-Device Terminal (R1.A)
+External Pad (In_Pad)
+    ↓ [In]
+[Trace Resistor: Rtr_In = 0.26Ω]
+    ↓ [nIn_metal1]
+[Via Resistor: Rvia_In_li1_metal1 = 14.69Ω]
+    ↓ [nIn_li1]
+Device Terminal (XR1.A)
+    ↓ (Device Body: sky130_fd_pr__res_high_po with tc1, tc2)
+Device Terminal (XR1.B)
+    ↓ [nMid_li1_0]
+[Via Resistor: Rvia_Mid_li1_metal1_0 = 14.69Ω]
+    ↓ [nMid_metal1_0]
+[Trace Resistor: Rtr_Mid = 0.31Ω]
+    ↓ [Mid]
+Midpoint Output Pad (Mid_Pad)
 ```
 
-**Total Resistance Chain:**
+**Substrate / Bus Topology:**
 ```
-R_total = R_trace + R_via1 + R_via2
-        = 0.65Ω + 14.7Ω + 14.7Ω
-        = 30.05Ω
+Bulk Tap 1 (XR1.BULK)  ──► [pdiff→li1→metal1 Vias] ──► nGND_metal1_0
+                                                            │
+                                             [Rbus_GND_Bus_0 = 0.91Ω]
+                                                            │
+Bulk Tap 2 (XR2.BULK)  ──► [pdiff→li1→metal1 Vias] ──► nGND_metal1_1
+                                                            │
+                                             [Trace Resistance Rtr_GND]
+                                                            ▼
+                                                    External GND_Pad [GND]
 ```
 
 ### Design Principles

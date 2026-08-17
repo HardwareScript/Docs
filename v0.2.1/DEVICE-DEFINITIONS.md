@@ -341,6 +341,98 @@ device NMOS:
 
 ---
 
+## Topological Channel Continuity Verification
+
+The compiler performs a physical topology check on every bound device after geometry binding. This check answers: **"Does the physical geometry actually form the continuous conductive path the user intended?"**
+
+This catches silent failures that are invisible at the source-code level — for example, a serpentine loop with a missing vertical connector segment that looks syntactically correct but is physically broken.
+
+### How Opt-In Works (Zero New Syntax)
+
+Opt-in is determined purely by **how many terminals a single pour declares**. No new keywords or annotations are needed:
+
+| Binding Style | Example | Compiler Behaviour |
+|---|---|---|
+| **Multi-Terminal Pour** | `device: R1.A, R1.B` | ✅ **Opted in.** The pour declares a shared conduction body connecting `A` to `B`. Compiler verifies that `A` can reach `B` through the physical geometry. |
+| **Single-Terminal Pour** | `device: C1.c0` | ⬜ **Opted out.** The pour is an isolated physical plate. The compiler does **not** force it to connect to other plates. |
+
+### Why It Works This Way
+
+When a user writes `device: R1.A, R1.B` on a pour (or a loop of pours), they are making an **explicit physical declaration**: *"This geometry is a shared resistive/conductive body whose two ends are terminal A and terminal B."* The compiler honours that declaration by verifying it.
+
+When a user writes `device: C1.c0` and `device: C1.c1` on separate pours, they are declaring **independent physical plates**. Capacitor plates are separated by a dielectric and intentionally do not share a DC conduction path. The compiler respects that.
+
+### Validation Algorithm
+
+Internally, `DeviceTopologyValidator` (in `crates/hwc-export/src/device_extractor/continuity.rs`) builds a 3D bounding-interval spatial graph:
+
+1. **Collect** all pours bound to the device (channel body pours + contact pours + via plugs).
+2. **Connect** pairs of elements whose 3D axis-aligned bounding boxes intersect.
+3. **Run Union-Find** (Disjoint Set Forest) to compute connected islands.
+4. **Check** whether every conduction terminal's contact pour lands in the same island.
+
+If terminals end up in different islands, the device fails with a detailed diagnostic:
+
+```
+Invalid geometry for Resistor 'R1': Device channel fragmentation:
+  Disconnected Terminal Pairs: 'A' ↮ 'B'
+  The channel geometry is fragmented into 2 disjoint islands (open circuit).
+    • Island 1: Seg0, Seg1, Seg2, Seg3, Vert0, Vert1, Vert2, Contact_A_LI
+    • Island 2: Seg4, Contact_B_LI
+```
+
+### Practical Examples
+
+#### ✅ Connected Serpentine Resistor (passes)
+
+```hw
+for i in 0..5:                         # 5 horizontal segments
+    add pour(Polysilicon) named Seg{i} on layer: polyres:
+        device: R1.A, R1.B             # Multi-terminal → opted in
+        ...
+
+for i in 0..4:                         # 4 vertical connectors (correct: N-1)
+    add pour(Polysilicon) named Vert{i} on layer: polyres:
+        device: R1.A, R1.B
+        ...
+```
+
+**Result**: All 5 segments are joined by 4 connectors → `A` reaches `B` → ✅ passes.
+
+#### ❌ Broken Serpentine Resistor (caught)
+
+```hw
+for i in 0..5:                         # 5 horizontal segments
+    add pour(Polysilicon) named Seg{i} on layer: polyres:
+        device: R1.A, R1.B
+        ...
+
+for i in 0..3:                         # ❌ Only 3 connectors — one turn is missing!
+    add pour(Polysilicon) named Vert{i} on layer: polyres:
+        device: R1.A, R1.B
+        ...
+```
+
+**Result**: `Seg4` is isolated → compiler catches the open circuit with the exact island breakdown.
+
+#### ✅ MIM Capacitor (correctly skipped)
+
+```hw
+add pour(CAPM) named Top_Plate on layer: capm:
+    device: C1.c0        # Single-terminal → opted out
+    net: VDD
+    ...
+
+add pour(Aluminum) named Bottom_Plate on layer: metal1:
+    device: C1.c1        # Single-terminal → opted out
+    net: GND
+    ...
+```
+
+**Result**: No shared channel body declared → continuity check is skipped → ✅ passes.
+
+---
+
 ## DRC Behavior with Devices
 
 ### Without Device Binding (Raw Pours)
@@ -500,3 +592,4 @@ To create other low-level devices:
 **Document History:**
 - 2026-08-03: Initial documentation based on resistor implementation
 - 2026-08-11: Added parasitic exemption architectural advantage section, validated against commercial LPE standards
+- 2026-08-17: Added Topological Channel Continuity Verification section documenting multi-terminal opt-in model, algorithm, and worked examples
