@@ -218,16 +218,20 @@ crates/hwc-export/src/netlist/parasitics/
 ## 1. Device Definitions
 
 ### Purpose
-Declare the **contract** for a physical device: terminals, materials, and SPICE export format.
+Declare the **contract** for a physical device: terminals, materials, declarative extraction metrics, and SPICE export format.
 
 ### Structure
 
 ```hw
-device Capacitor:
+export device Capacitor:
     terminals: [top, bottom]
     materials:
         top: Aluminum
         bottom: Polysilicon
+    metrics:
+        C: capacitance(plate_a: top, plate_b: bottom)
+        AREA: overlap_area(top, bottom)
+        PJ: overlap_perimeter(top, bottom)
     spice:
         prefix: C
         terminal_order: [top, bottom]
@@ -238,19 +242,35 @@ device Capacitor:
 ### Required Fields
 
 #### `terminals: [...]`
-List of terminal names. Must match geometry bindings.
+Ordered list of terminal names. Must match geometry bindings.
 
 #### `materials: { terminal: material }`
-Expected materials for each terminal. Enforces physical constraints.
+Expected materials or allowed alternatives for each terminal. Enforces physical layout constraints.
+
+#### `metrics:` block (Mandatory for Extracted Parameters)
+**Zero Compiler Magic**. Every parameter listed in `spice.parameters` **MUST** have a corresponding mathematical rule in `metrics:`. Evaluated purely via 2D topological vector calculus (`Vector2D`, `ConductionFlux`).
+
+| Operator | Syntax | Description | Unit |
+| :--- | :--- | :--- | :--- |
+| **Channel Length** | `channel_length(from: S, to: D, control: G)` | Projects control electrode span along unit conduction flux vector $\hat{u}$ | $\mu m$ |
+| **Channel Width** | `channel_width(from: S, to: D, control: G)` | Evaluates active diffusion / channel width along transverse normal $\hat{u}^\perp$ | $\mu m$ |
+| **Clear Span** | `clear_span(from: A, to: B)` | Inner contact-to-contact clear span along flux vector | $\mu m$ |
+| **Transverse Width** | `transverse_width(from: A, to: B)` | Conduction body width perpendicular to flux vector | $\mu m$ |
+| **Overlap Area** | `overlap_area(terminal_a: C0, terminal_b: C1)` | 2D overlap surface area between two conductive plates | $\mu m^2$ |
+| **Overlap Perimeter**| `overlap_perimeter(terminal_a: C0, terminal_b: C1)`| 2D overlap boundary perimeter | $\mu m$ |
+| **Diffusion Area** | `area(terminal: D, exclude: G)` | Polygon surface area with optional gate electrode subtraction | $m^2$ |
+| **Diffusion Perimeter**| `perimeter(terminal: D, exclude: G)` | Polygon boundary perimeter with optional gate electrode subtraction | $m$ |
+| **Maxwell Resistance**| `resistance(from: A, to: B)` | Evaluates $R = \rho \cdot \frac{L}{W \cdot t}$ from geometry & stackup resistivity | $\Omega$ |
+| **Plate Capacitance** | `capacitance(plate_a: C0, plate_b: C1)` | Evaluates $C = \varepsilon_0 \varepsilon_r \frac{A}{d}$ from overlap & dielectric stack | $F$ |
 
 #### `spice:` block
 **ALL fields are REQUIRED** - no defaults, fail loudly if missing.
 
 | Field | Type | Description | Example |
 |-------|------|-------------|---------|
-| `prefix` | char | SPICE device prefix | `C` for capacitor, `R` for resistor, `M` for MOSFET |
+| `prefix` | char | SPICE device prefix | `C` for capacitor, `R` for resistor, `M` for MOSFET, `X` for subcircuit |
 | `terminal_order` | [string] | Order of terminals in SPICE card | `[top, bottom]` → `CC1 In Out <value>` |
-| `parameters` | [string] | Parameter names to extract | `[C]` for capacitance, `[R]` for resistance |
+| `parameters` | [string] | Parameter names to extract | `[C]` for capacitance, `[W, L]` for transistors |
 | `parameter_style` | enum | Formatting style: `positional` or `named` | See below |
 
 #### `parameter_style` Values
@@ -265,15 +285,15 @@ Expected materials for each terminal. Enforces physical constraints.
 - **`named`**: Value as named parameter
   ```spice
   MM1 drain gate source bulk NMOS W=1.5u L=0.18u
+  XR1 n1 n2 nGND sky130_fd_pr__res_high_po W=1.0u L=4.0u
   ```
   Used by: M, Q, J, X (transistors, subcircuits)
 
-### Why `parameter_style` is Required
+### Why `parameter_style` and `metrics` are Required
 
-The user must explicitly declare formatting because:
-1. **No compiler guessing** - adding a new device type shouldn't require Rust code changes
-2. **SPICE syntax varies** - passives use positional, active devices use named
-3. **User control** - you decide the output format, not the compiler
+1. **Zero Compiler Magic** - Adding a new device family (GAA-FET, Memristor, Optoelectronics) requires 0 Rust compiler changes.
+2. **Infinite Scalability** - The user and PDK declare the exact math, orientation, and SPICE syntax directly in `.hw` files.
+3. **Strict Validation** - The compiler fails loudly at parse time if any requested parameter lacks an extraction formula.
 
 ---
 
@@ -372,12 +392,15 @@ Foundry PDKs (SkyWater SKY130, TSMC, Intel) provide SPICE subcircuits with **mor
 ### Device Definition with Subcircuit
 
 ```hw
-device Resistor:
+export device Resistor:
     terminals: [A, B, BULK]           # ALL 3 terminals declared
     materials:
-        A: Polysilicon                # Physical terminal
-        B: Polysilicon                # Physical terminal
-        BULK: Air                     # Virtual terminal (no physical pour)
+        A: [Polysilicon, Titanium_Silicide, Aluminum]
+        B: [Polysilicon, Titanium_Silicide, Aluminum]
+        BULK: [Air, P_Plus_Diffusion, Titanium_Silicide]
+    metrics:
+        L: clear_span(from: A, to: B)
+        W: transverse_width(from: A, to: B)
     spice:
         prefix: X                     # X for subcircuit calls
         subcircuit: sky130_fd_pr__res_high_po  # PDK subcircuit name

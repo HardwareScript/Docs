@@ -63,29 +63,76 @@ See `NETLIST-ARCHITECTURE.md` Section 0 for detailed validation and comparison w
 At the top level (outside any `space` or `module`), define the device type:
 
 ```hw
-device Resistor:
-    terminals: [A, B]
+export device Resistor:
+    terminals: [A, B, BULK]
     materials:
-        A: Polysilicon
-        B: Polysilicon
+        A: [Polysilicon, Titanium_Silicide, Aluminum]
+        B: [Polysilicon, Titanium_Silicide, Aluminum]
+        BULK: [Air, P_Plus_Diffusion, Titanium_Silicide]
+    metrics:
+        L: clear_span(from: A, to: B)
+        W: transverse_width(from: A, to: B)
+    spice:
+        prefix: X
+        subcircuit: sky130_fd_pr__res_high_po
+        terminal_order: [A, B, BULK]
+        parameters: [W, L]
+        parameter_style: named
 ```
 
-**Fields:**
-- `terminals`: List of electrical terminals (connection points)
-- `materials`: Material requirements for each terminal
+**Required Fields:**
+- `terminals`: Ordered list of electrical terminals (connection points)
+- `materials`: Material requirements/alternatives for each terminal
+- `metrics`: Declarative mathematical extraction operators (evaluated via 2D topological vector calculus)
+- `spice`: SPICE netlist export metadata (`prefix`, `terminal_order`, `parameters`, `parameter_style`)
 - `tolerance` (optional): Parameter tolerances for LVS verification
 
-**Example with Multiple Materials:**
+---
+
+### Step 1.5: Universal Geometric & Physical Operators (`metrics:`)
+
+HardwareScript enforces **Zero-Magic Device Extraction**. Instead of guessing terminal roles in Rust compiler code, the `.hw` device contract declares the exact geometric measurement rules:
 
 ```hw
-device NMOS:
-    terminals: [gate, source, drain, bulk]
+export device NMOS:
+    terminals: [D, G, S, B]
     materials:
-        gate: [Polysilicon, Aluminum]  # Either material allowed
-        source: Silicon_N
-        drain: Silicon_N
-        bulk: Silicon_P
+        D: [N_Plus_Diffusion, Titanium_Silicide, Aluminum]
+        G: [Polysilicon, Titanium_Silicide, Aluminum]
+        S: [N_Plus_Diffusion, Titanium_Silicide, Aluminum]
+        B: [P_Plus_Diffusion, Titanium_Silicide, Aluminum]
+    
+    # ── Universal Geometry Operators (Pure Declarative Math) ──
+    metrics:
+        L:  channel_length(from: S, to: D, control: G)
+        W:  channel_width(from: S, to: D, control: G)
+        AD: area(D, exclude: G)
+        AS: area(S, exclude: G)
+        PD: perimeter(D, exclude: G)
+        PS: perimeter(S, exclude: G)
+
+    spice:
+        prefix: X
+        subcircuit: sky130_fd_pr__nfet_01v8
+        terminal_order: [D, G, S, B]
+        parameters: [W, L, AD, AS, PD, PS]
+        parameter_style: named
 ```
+
+#### Supported Metric Operators
+
+| Operator | Syntax | Description | Unit |
+| :--- | :--- | :--- | :--- |
+| **Channel Length** | `channel_length(from: S, to: D, control: G)` | Projects control electrode span along unit conduction flux vector $\hat{u}$ | $\mu m$ |
+| **Channel Width** | `channel_width(from: S, to: D, control: G)` | Evaluates active diffusion / channel width along transverse normal $\hat{u}^\perp$ | $\mu m$ |
+| **Clear Span** | `clear_span(from: A, to: B)` | Inner contact-to-contact clear span along flux vector | $\mu m$ |
+| **Transverse Width** | `transverse_width(from: A, to: B)` | Conduction body width perpendicular to flux vector | $\mu m$ |
+| **Overlap Area** | `overlap_area(terminal_a: C0, terminal_b: C1)` | 2D overlap surface area between two conductive plates | $\mu m^2$ |
+| **Overlap Perimeter**| `overlap_perimeter(terminal_a: C0, terminal_b: C1)`| 2D overlap boundary perimeter | $\mu m$ |
+| **Diffusion Area** | `area(terminal: D, exclude: G)` | Polygon surface area with optional gate electrode subtraction | $m^2$ |
+| **Diffusion Perimeter**| `perimeter(terminal: D, exclude: G)` | Polygon boundary perimeter with optional gate electrode subtraction | $m$ |
+| **Maxwell Resistance**| `resistance(from: A, to: B)` | Evaluates $R = \rho \cdot \frac{L}{W \cdot t}$ from geometry & stackup resistivity | $\Omega$ |
+| **Plate Capacitance** | `capacitance(plate_a: C0, plate_b: C1)` | Evaluates $C = \varepsilon_0 \varepsilon_r \frac{A}{d}$ from overlap & dielectric stack | $F$ |
 
 ---
 
@@ -160,11 +207,18 @@ import * from "./resistor_pdk"
 # DEVICE DEFINITION (Top Level)
 # ========================================================================
 
-device Resistor:
+export device Resistor:
     terminals: [A, B]
     materials:
         A: Polysilicon
         B: Polysilicon
+    metrics:
+        R: resistance(from: A, to: B)
+    spice:
+        prefix: R
+        terminal_order: [A, B]
+        parameters: [R]
+        parameter_style: positional
 
 # ========================================================================
 # MODULE (Logical Interface)
