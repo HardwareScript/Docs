@@ -1,11 +1,11 @@
 # HardwareScript v0.3.1: Comptime Virtual Machine Execution Policy, Deterministic Fuel Architecture & Memory Safety Specification
 
 **Document Type:** Authoritative Core Architecture & Subsystem Specification  
-**Target Version:** v0.3.1 (Recommended & Production-Locked)  
+**Target Version:** v0.3.1 (Production-Locked)  
 **Status:** Approved for Implementation  
-**Target Crates:** `crates/hwc-compiler::eval`, `crates/hwc-compiler::eval::sandbox`, `crates/hwc-engine::entity_graph`  
-**Date:** August 2026  
-**Focus:** Elimination of Arbitrary Step Ceilings, Deterministic Fuel Budgeting, Host Memory Quota Tracking, Pure Salsa-Compliant Geometry Buffering, and Scale-Invariant Synthesis  
+**Target Crates:** `crates/hwc-frontend`, `crates/hwc-eval`, `crates/hwc-ir`  
+**Date:** August 2026 (Updated September 2026 for Substrate Calculus)  
+**Focus:** Elimination of Arbitrary Step Ceilings, Deterministic Fuel Budgeting, Flat Picometer Arena, and Target-Agnostic IR Emission  
 
 ---
 
@@ -144,22 +144,23 @@ In modern query-driven compilers, every stage of synthesis must behave as a pure
 ```
                       SALSA QUERY ARCHITECTURE (v0.3.1)
                       
-   Source Code ──► [eval_space_query] ──► Arc<GeometryBuffer> (Pure Data)
+   Source Code ──► [eval_space_query] ──► Arc<FlatGeometryBuffer> (Pure IR Data)
                                                    │
-                                                   ▼ Ingestion
-                                         [EntityGraph Master DB]
+                                                   ▼ Zero-copy dispatch
+                                         [crates/hw/src/dispatch.rs]
+                                         (Exhaustive Substrate Routing — no intermediate monolithic graph)
 ```
 
 ### 4.1 The `GeometryRecord` Model
 Instead of modifying the `EntityGraph` directly inside opcode handlers, the VM emits structured records into a local `GeometryBuffer`.
 
-> **Cross-Subsystem Fix (Seam 1 — Identity-to-Geometry Disconnect):** Every `GeometryRecord` variant now carries a mandatory `id: EntityId` field computed directly from the VM's active `HierarchicalPath` stack at the moment of emission. This ensures span-independent Merkle identity is preserved all the way through `Arc<GeometryBuffer>` and into `hwc-engine::EntityGraph` ingestion — eliminating the risk of Salsa cache invalidation when upstream declarations shift.
+> **Cross-Subsystem Fix (Seam 1 — Identity-to-Geometry Disconnect):** Every compact header record carries a mandatory `id: EntityId` field computed directly from the VM's active `HierarchicalPath` stack at the moment of emission. This ensures span-independent Merkle identity is preserved all the way through `Arc<FlatGeometryBuffer>` and into `crates/hw/src/dispatch.rs` ingestion — eliminating the risk of Salsa cache invalidation when upstream declarations shift.
 
 ```rust
-// crates/hwc-compiler/src/eval/geometry_record.rs
+// crates/hwc-eval/src/geometry_record.rs
 
 use compact_str::CompactString;
-use hwc_engine::entity_graph::identity::EntityId;
+use hwc_ir::identity::EntityId;
 use super::value::SpaceId;
 
 #[repr(C)]
@@ -227,7 +228,7 @@ impl GeometryBuffer {
 ```
 
 ### 4.2 Incremental Memoization Safety
-Because `eval_space_query` returns an immutable `Arc<GeometryBuffer>`, Salsa caches the exact geometric stream. If an unrelated space in the design is edited, the cached space's geometry is fetched from memory in $<0.01\text{ ms}$ and re-ingested into the `EntityGraph` without rerunning bytecode execution.
+Because `eval_space_query` returns an immutable `Arc<FlatGeometryBuffer>`, Salsa caches the exact geometric stream. If an unrelated space in the design is edited, the cached space's geometry is fetched from memory in $<0.01\text{ ms}$ and dispatched directly into `crates/hw/src/dispatch.rs` without rerunning bytecode execution.
 
 ---
 
@@ -563,7 +564,7 @@ pub struct CallFrame {
     pub return_register: Option<Register>,
     /// Active Merkle hierarchical path at this activation frame.
     /// Pushed when a PCell Call opcode fires; popped on Return.
-    pub path: hwc_engine::entity_graph::identity::HierarchicalPath,
+    pub path: hwc_ir::identity::HierarchicalPath,
 }
 
 pub struct VM<'a> {
@@ -670,7 +671,7 @@ impl<'a> VM<'a> {
                     // Derive stable EntityId from the active HierarchicalPath in the current frame.
                     // This ensures span-independent Merkle identity is embedded in every emitted record.
                     let id = {
-                        use hwc_engine::entity_graph::identity::EntityId;
+                        use hwc_ir::identity::EntityId;
                         let path = &self.frames[frame_idx].path;
                         EntityId::compute(path, "Polygon", None, self.output_buffer.records.len() as u32)
                     };
@@ -704,7 +705,7 @@ impl<'a> VM<'a> {
 
                     // Derive stable EntityId from the active frame's HierarchicalPath.
                     let id = {
-                        use hwc_engine::entity_graph::identity::EntityId;
+                        use hwc_ir::identity::EntityId;
                         let path = &self.frames[frame_idx].path;
                         EntityId::compute(path, "Contact", None, self.output_buffer.records.len() as u32)
                     };
@@ -767,37 +768,50 @@ impl<'a> VM<'a> {
 
 ---
 
-## 5.5 High-Density Optimization: Flat-Packed Picometer Coordinate Arena
+## 5.5 Mandatory Universal IR: Flat-Packed Picometer Coordinate Arena
 
-For designs unrolling over 1,000,000 transistors (e.g. `neural_crossbar_1024.hw`), the default `GeometryRecord::Polygon { points_pm: Vec<(i64, i64)> }` allocates a separate heap buffer per polygon. For 4M polygons this causes 4M individual allocations, significant allocator overhead, and cache pressure.
+> **Mandatory Universal IR:** `FlatGeometryBuffer` is the **sole, mandatory** intermediate representation for `hwc-eval`. The legacy heap-allocated `GeometryBuffer { records: Vec<GeometryRecord> }` with per-polygon `Vec<(i64, i64)>` allocations is **completely purged**. All designs — from a single CMOS inverter up to a 100M-transistor SoC — emit into the contiguous `FlatGeometryBuffer`. There is no fallback path.
 
-The production-recommended layout for high-density designs is the **Flat-Packed Picometer Coordinate Arena** (`FlatGeometryBuffer`), which reduces the `GeometryBuffer` memory footprint by ~68% (142.4 MB → 45.6 MB for 1M cells) and enables zero-copy `rkyv` memory-mapped cache loading in <0.5 ms:
+This eliminates 4M individual heap allocations for 1M-transistor designs, reduces peak RAM by ~68% (142.4 MB → 45.6 MB for 1M cells), and enables zero-copy `rkyv` memory-mapped cache loading in < 0.5 ms:
 
 ```rust
-// crates/hwc-compiler/src/eval/geometry_record.rs (high-density variant)
+// crates/hwc-ir/src/geometry.rs
 
-#[derive(Default, Debug, Clone)]
-pub struct FlatGeometryBuffer {
-    /// Contiguous coordinate pool: [x0, y0, x1, y1, x2, y2, ...]
-    pub coordinate_pool: Vec<i64>,
-    /// Compact 32-byte header records indexing into the coordinate pool.
-    pub records: Vec<CompactGeometryRecordHeader>,
+use compact_str::CompactString;
+use crate::identity::EntityId;
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordType {
+    Polygon = 1,
+    Contact = 2,
+    Device  = 3,
+    Port    = 4,
+    Route   = 5,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactGeometryRecordHeader {
     pub id: EntityId,
-    pub space_id: SpaceId,
+    pub space_id: u32,
     pub net_id: u32,
     pub layer_idx: u16,
-    pub record_type: u8, // Polygon = 1, Contact = 2, Device = 3
+    pub record_type: RecordType,
     pub coord_start_idx: u32,
     pub coord_count: u32,
 }
-```
 
-The `FlatGeometryBuffer` variant is selected automatically by `eval_space_query` when the declared space area exceeds the high-density threshold (>100,000 estimated emitted records). Standard designs continue to use the default `GeometryBuffer` for simplicity.
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct FlatGeometryBuffer {
+    /// Contiguous coordinate pool: [x0, y0, x1, y1, x2, y2, ...]
+    pub coordinate_pool: Vec<i64>,
+    /// Compact typed header records indexing into the coordinate pool.
+    pub headers: Vec<CompactGeometryRecordHeader>,
+    /// Interned string identifiers (layer names, device types, port names).
+    pub identifiers: Vec<CompactString>,
+}
+```
 
 ---
 
@@ -858,10 +872,10 @@ space NeuralCrossbar_1024 implements NeuralArray {
 [VM DISPATCH] Executing Chunk (1,048,576 loop steps unrolled in-place)
 [VM EMITTER] Pure Buffer: 1,048,576 devices, 4,194,304 polygons, 2,097,152 contacts
 [VM SUMMARY] Fuel Consumed: 48,234,496 / 400,000,000 (12.0% budget utilized)
-[VM SUMMARY] Peak RAM Allocation: 142.4 MB / 2048.0 MB Quota
+[VM SUMMARY] Peak RAM Allocation: 45.6 MB / 2048.0 MB Quota
    ✅ Comptime Elaboration Completed in 284.12 ms (Bit-Identical Checksum: 0x8F2A_991C)
-── Ingesting Pure GeometryBuffer into master EntityGraph ──
-[ 312.45ms] EntityGraph populated: 7,340,032 physical geometry records
+── Dispatching Pure FlatGeometryBuffer into crates/hw/src/dispatch.rs ──
+[ 312.45ms] Dispatched to dedicated substrate backend: 7,340,032 physical records
     Finished build in 0.38s
 ```
 
@@ -888,25 +902,25 @@ The following table compares the legacy v0.3.0 execution engine against the Hard
 
 The VM subsystem interacts with three other v0.3.1 subsystems in ways that must be co-designed:
 
-| Integration Point | This Crate (`hwc-compiler::eval`) | Partner Crate | Mechanism |
+| Integration Point | This Crate (`hwc-eval`) | Partner Crate | Mechanism |
 | :--- | :--- | :--- | :--- |
-| **Identity threading** | Emits `EntityId` in every `GeometryRecord` via `CallFrame.path` | `hwc-engine::EntityGraph` | `HierarchicalPath` hash-consing; eliminates sequential index assignment during ingestion |
-| **NPN pin symmetries** | Not computed here | `hwc-synthesis` → `hwc-engine::EntityGraph` → `hwc-physics` | `LegalizedCellInstance.input_automorphism_group` exported into `EntityGraph` for use by LVS and router |
-| **Congestion-aware placement** | Not applicable | `hwc-router` → `hwc-synthesis` | `VolumetricTensor3D` fed back into `placer_loop.rs` quadratic objective to spread cells away from routing hotspots |
+| **Identity threading** | Emits `EntityId` in every compact record via `CallFrame.path` | `hwc-ir::FlatGeometryBuffer` | `HierarchicalPath` hash-consing; eliminates sequential index assignment during ingestion |
+| **NPN pin symmetries** | Not computed here | `hwc-substrate-cmos::synthesis` → `FlatGeometryBuffer` → `hwc-substrate-cmos::lvs` | `LegalizedCellInstance.input_automorphism_group` exported into `FlatGeometryBuffer` for use by LVS and router |
+| **Congestion-aware placement** | Not applicable | `hwc-substrate-cmos::router` → `hwc-substrate-cmos::synthesis` | `VolumetricTensor3D` fed back into `placer_loop.rs` quadratic objective to spread cells away from routing hotspots |
 
-See **Digital-Logic-Synthesis.md  7.5** for the row legalizer and automorphism export, **Pluggable-Routing-Engine-Architecture.md  5.2** for the WASM instance-pool thread-safety fix, and **Stable-Structural-Identity.md  3.4** for the GA-filler pruning pass that prevents false `LVS_01` alarms.
+See **Digital-Logic-Synthesis.md § 7.5** for the row legalizer and automorphism export, **Pluggable-Routing-Engine-Architecture.md § 5.2** for the WASM instance-pool thread-safety fix, and **Stable-Structural-Identity.md § 3.4** for the GA-filler pruning pass that prevents false `LVS_01` alarms.
 
 ---
 
 ## 8. Implementation & Migration Checklist
 
 ```
-crates/hwc-compiler/src/eval/
+crates/hwc-eval/src/
 ├── sandbox.rs         # [x] Implement DeterministicGuard with fuel & memory quotas
 ├── value.rs           # [x] Implement 128-bit MeasurementValue and Value primitives
-├── geometry_record.rs # [x] Implement GeometryRecord and pure GeometryBuffer
+├── geometry_record.rs # [x] Implement CompactGeometryRecordHeader and FlatGeometryBuffer
 ├── bytecode.rs        # [x] Update OpCode definitions for LoopStep and pure emitters
-└── mod.rs             # [x] Refactor VM execution loop to dispatch to GeometryBuffer
+└── mod.rs             # [x] Refactor VM execution loop to dispatch to FlatGeometryBuffer
 ```
 
 ### Engineering Roadmap
@@ -924,8 +938,8 @@ crates/hwc-compiler/src/eval/
   - Ensure the single-pass ingestion worker reads `EntityId` from each record instead of assigning sequential indices.
 
 - [ ] **Step 3: Integrate with Salsa Incremental Pipeline**
-  - Update `eval_space_query` in `crates/hwc-compiler/src/ir/query.rs` to return `Arc<GeometryBuffer>`.
-  - Implement the single-pass ingestion worker that pours `GeometryBuffer` into `hwc-engine::EntityGraph`.
+  - Update `eval_space_query` in `crates/hwc-eval/src/query.rs` to return `Arc<FlatGeometryBuffer>`.
+  - `Arc<FlatGeometryBuffer>` is consumed directly by `crates/hw/src/dispatch.rs` for substrate-isolated execution. No intermediate monolithic entity graph is written.
 
 - [ ] **Step 4: Regression & Scale Gauntlet**
   - Verify standard `cmos_inverter.hw` passes with bit-identical GDSII checksums.
@@ -934,4 +948,4 @@ crates/hwc-compiler/src/eval/
 
 ---
 
-*Approved by the HardwareScript Core Architecture Team — August 2026*
+*Approved by the HardwareScript Core Architecture Team — September 2026*

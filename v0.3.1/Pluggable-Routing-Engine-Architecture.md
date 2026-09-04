@@ -1,10 +1,10 @@
 # HardwareScript v0.3.1: Tri-Hybrid Physical Routing Engine & Universal `wasm64` Extensibility Specification
 
 **Document Type:** Authoritative Core Architecture & Subsystem Specification  
-**Target Version:** v0.3.1 (Recommended & Production-Locked Standard)  
+**Target Version:** v0.3.1 (Production-Locked Standard)  
 **Status:** Approved for Implementation  
-**Target Crate:** `crates/hwc-router`  
-**Downstream Dependents:** `hwc-engine`, `hwc-compiler`, `hwc-physics`, `hwc-export`  
+**Target Crates:** `crates/hwc-substrate-cmos::router`, `crates/hwc-substrate-laminate::router`, `crates/hwc-substrate-wasm`  
+**Downstream Dependents:** `hwc-ir`, `hwc-eval`, `hwc-substrate-cmos`, `hwc-substrate-laminate`, `hwc-export`  
 **Reference Standards:** CU-GR 3D Global Routing, Dr. CU 2.0 Sparse-Grid Detailed Routing, FastGR/InstantGR GPU Pattern Acceleration, W3C WebAssembly 64-Bit Linear Memory (`Memory64`), IEEE 1801 Liberty / Physical Signoff
 
 ---
@@ -69,10 +69,9 @@ The routing pipeline operates as a unidirectional physical synthesis flow:
                                       │ 3D Routing Guides
                                       ▼
  ┌─────────────────────────────────────────────────────────────────────────┐
- │ STAGE 3: PANEL TRACK ASSIGNMENT (TA)                                    │
- │ • Slices G-Cells into multi-cell horizontal/vertical panels.            │
- │ • Solves Maximum Weight Bipartite Matching to assign trunk tracks.      │
- │ • Reads NPN symmetries from EntityGraph for dynamic pin swapping (A↔B).  │
+ │ STAGE 3: TRACK ASSIGNMENT (TA)                                          │
+ │ • Coarse global-to-track mapping via integer linear programming (ILP).   │
+ │ • Reads NPN symmetries from FlatGeometryBuffer for dynamic pin swapping.│
  └────────────────────────────────────┬────────────────────────────────────┘
                                       │ Assigned Physical Track Anchors
                                       ▼
@@ -100,11 +99,11 @@ The routing pipeline operates as a unidirectional physical synthesis flow:
 All routing primitives reside in `crates/hwc-router/src/types.rs` and enforce $i64$ fixed-point picometers ($1\text{ pm} = 10^{-12}\text{ m}$).
 
 ```rust
-// crates/hwc-router/src/types.rs
+// crates/hwc-substrate-cmos/src/router/types.rs
 
 use compact_str::CompactString;
-use hwc_engine::entity_graph::NetId;
-use hwc_engine::geometry::{BoundingBox, Point3D};
+use hwc_ir::geometry::{BoundingBox, Point3D};
+use hwc_ir::net::NetId;
 
 // ============================================================================
 // 1. PIN ACCESS ANALYSIS (PAA) TYPES
@@ -240,10 +239,11 @@ pub struct RoutedOutput {
 The interface between the physical database and any routing solver is encapsulated by the `RouterEngine` trait in `crates/hwc-router/src/traits.rs`.
 
 ```rust
-// crates/hwc-router/src/traits.rs
+// crates/hwc-substrate-cmos/src/router/traits.rs
 
-use crate::types::{PinAccessMap, RoutedOutput};
-use hwc_engine::entity_graph::EntityGraph;
+use crate::router::types::{PinAccessMap, RoutedOutput};
+use hwc_ir::flat_geometry::FlatGeometryBuffer;
+use hwc_ir::space::SemiconductorTargetConfig;
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -268,10 +268,10 @@ pub enum RoutingError {
     PluginFailure { message: String },
 }
 
-/// Contextual design payload passed into the routing engine.
+/// Contextual payload passed into the routing engine from the substrate pipeline.
 pub struct RoutingTask<'a> {
-    pub entity_graph: &'a EntityGraph,
-    pub stackup: &'a hwc_engine::stackup::StackupManager,
+    pub flat_buffer: &'a FlatGeometryBuffer,
+    pub config: &'a SemiconductorTargetConfig,
     pub pin_access_map: &'a PinAccessMap,
 }
 
@@ -288,6 +288,8 @@ pub trait RouterEngine: Send + Sync {
 ---
 
 ## 5. Universal `wasm64` (Memory64) Extensibility Protocol
+
+> **Tier-2 Stage ABI Alignment:** The external WASM routing interface defined by `HwcRoutingTask64` and `HwcRoutingOutput64` is the canonical Tier-2 Stage Detailed Router ABI defined in `hwc_ir::abi::stage_abi`. All external router plugins compiled from C++, Zig, or Rust target this exact memory layout under WebAssembly Memory64. Custom routers implement this single interface to seamlessly plug into both native and WASM-hosted substrate backends — no ad-hoc struct variants are permitted.
 
 HardwareScript rejects operating-system-specific shared libraries (`.so`, `.dll`, `.dylib`) because they fragment the ecosystem, break on differing platforms, and violate hermetic reproducibility.
 
@@ -748,18 +750,32 @@ The `CutMaskPolygon` records emitted in `RoutedOutput.cut_masks` by Dr. CU 2.0 b
 # top_soc.hw - HardwareScript v0.3.1
 import * from @std/primitives/units
 import { sky130_nmos, sky130_pmos } from @std/pdk/sky130
+import { SemiconductorSubstrate } from @std/substrates
 
-# Using the Native Tri-Hybrid Engine (GPU Global + CPU Sparse Detailed)
-profile TSMC_2nm_GAAFET {
-    technology: "ASIC"
-    router_engine: "native"
+# The profile statically implements the Nominal Substrate Trait.
+# No technology: "ASIC" string — substrate kind is carried by the type system.
+export profile TSMC_2nm_GAAFET implements SemiconductorSubstrate {
+    manufacturing_grid: 2nm
+    lambda: 20nm
+
+    masks {
+        active: { gds_layer: 1, datatype: 0 }
+        poly:   { gds_layer: 2, datatype: 0 }
+        m1:     { gds_layer: 3, datatype: 0 }
+    }
+
+    routing {
+        topology: "manhattan"
+        grid: 2nm
+        preferred_directions {
+            m1: "horizontal"
+        }
+    }
+
+    drc {
+        antenna_ratio_max: 400.0
+    }
 }
-
-# OR: Seamlessly switch to a custom WASM router plugin for a proprietary node
-# profile TSMC_2nm_GAAFET {
-#     technology: "ASIC"
-#     plugin_router: "./plugins/custom_gaafet_router.wasm"
-# }
 
 space CoreSoC {
     dimensions: [100.0um, 100.0um]
@@ -771,7 +787,7 @@ space CoreSoC {
         CLK: { classification: signal }
     }
 
-    # Floorplanned macro blocks routed by `crates/hwc-router`
+    # Macro placement and bundle routing dispatched to `hwc-substrate-cmos`
 }
 ```
 
@@ -820,7 +836,7 @@ The `hwc-router` crate participates in four cross-subsystem integration points i
 
 | Integration Point | This Crate (`hwc-router`) | Partner Crate | Mechanism |
 | :--- | :--- | :--- | :--- |
-| **NPN Pin Swapping** | Stage 3 TA reads `input_automorphism_group` from `EntityGraph` | `hwc-synthesis` (producer), `hwc-physics` LVS (also consumer) | Pre-computed $S_2, S_3$ permutation orbits from NPN canonicalizer; O(1) lookup; eliminates duplicate automorphism solving |
+| **NPN Pin Swapping** | Stage 3 TA reads `input_automorphism_group` from `FlatGeometryBuffer` | `hwc-substrate-cmos::synthesis` (producer), `hwc-substrate-cmos::lvs` (also consumer) | Pre-computed $S_2, S_3$ permutation orbits from NPN canonicalizer; O(1) lookup; eliminates duplicate automorphism solving |
 | **Congestion Tensor Feedback** | `VolumetricTensor3D` (Stage 2) exposed via `congestion_at_pm()` | `hwc-synthesis` `placer_loop.rs` | Spreads cells from congested macro boundaries during synthesis; prevents routing hotspots before Stage 1 PAA |
 | **Row-Legalized Pin Coordinates** | Stage 1 PAA requires on-grid pin positions | `hwc-synthesis` `row_legalizer.rs` | `StandardCellRowLegalizer` snaps quadratic placement to PDK site grid; prevents `Error R01: PinAccessStarvation` |
 | **WASM Thread Safety** | DOPHR Stage 3 runs 16 Rayon threads | `wasm64_runner.rs` Thread-Local Pool | Per-thread `wasmtime::Store + Instance`; global plugins at Stage 2 single-threaded |
@@ -833,35 +849,39 @@ See **Digital-Logic-Synthesis.md  7.1** for the row legalizer, **Digital-Logic-S
 ## 10. Implementation Manifest
 
 ```
-crates/hwc-router/
-├── Cargo.toml
-└── src/
-    ├── lib.rs                  # Public router interface & pipeline dispatcher
-    ├── types.rs                # 14-byte Tensor, AccessPoint, RoutedOutput
-    ├── traits.rs               # Universal `RouterEngine` trait & `RoutingError`
-    ├── paa/
-    │   ├── mod.rs
-    │   └── scoring.rs          # Pin Access Analysis on-grid scoring engine
-    ├── global/
-    │   ├── mod.rs
-    │   ├── tensor.rs           # 14-byte SoA Volumetric Tensor
-    │   ├── cuda_fastgr.rs      # GPU-accelerated pattern routing kernel
-    │   └── cpu_pathfinder.rs   # CPU L3-cache fallback PathFinder
-    ├── track_assign/
-    │   ├── mod.rs
-    │   ├── bipartite.rs        # Maximum Weight Bipartite Matching engine
-    │   └── pin_swap.rs         # NPN automorphism-driven symmetric pin swapping (S2, S3)
-    ├── detailed/
-    │   ├── mod.rs
-    │   ├── sparse_grid.rs      # Dr. CU 2.0 multi-level sparse grid graph
-    │   ├── lookahead_drc.rs    # In-search EOL, area, and spacing heuristics
-    │   └── timing_rrr.rs       # Timing-slack-weighted Rip-Up & Repair
-    └── ffi/
-        ├── mod.rs
-        ├── c_abi.rs            # Universal 64-bit C-ABI types
+crates/
+├── hwc-substrate-cmos/
+│   └── src/router/
+│       ├── mod.rs              # CMOS 5nm DBU Tri-Hybrid Router pipeline
+│       ├── types.rs            # 14-byte Tensor, AccessPoint, RoutedOutput (hwc_ir types)
+│       ├── traits.rs           # `RouterEngine` trait; RoutingTask takes &FlatGeometryBuffer
+│       ├── paa/
+│       │   ├── mod.rs
+│       │   └── scoring.rs      # Pin Access Analysis on-grid scoring engine
+│       ├── global/
+│       │   ├── mod.rs
+│       │   ├── tensor.rs       # 14-byte SoA Volumetric Tensor
+│       │   ├── cuda_fastgr.rs  # GPU-accelerated pattern routing kernel
+│       │   └── cpu_pathfinder.rs # CPU L3-cache fallback PathFinder
+│       ├── track_assign/
+│       │   ├── mod.rs
+│       │   ├── bipartite.rs    # Maximum Weight Bipartite Matching engine
+│       │   └── pin_swap.rs     # NPN automorphism-driven symmetric pin swapping (S2, S3)
+│       ├── detailed/
+│       │   ├── mod.rs
+│       │   ├── sparse_grid.rs  # Dr. CU 2.0 multi-level sparse grid graph
+│       │   ├── lookahead_drc.rs # In-search EOL, area, and spacing heuristics
+│       │   └── timing_rrr.rs   # Timing-slack-weighted Rip-Up & Repair
+│       └── eco.rs              # Freeze-Silicon Metal-Only ECO router (5nm DBU)
+├── hwc-substrate-laminate/
+│   └── src/router/
+│       └── mod.rs              # Continuous vector topological PCB/laminate router
+└── hwc-substrate-wasm/
+    └── src/
+        ├── c_abi.rs            # Tier-2 Stage ABI types (re-exports hwc_ir::abi::stage_abi)
         └── wasm64_runner.rs    # Embedded Wasmtime Memory64 runtime
 ```
 
 ---
 
-*Approved by the HardwareScript Core Architecture Team — August 2026*
+*Approved by the HardwareScript Core Architecture Team — September 2026*

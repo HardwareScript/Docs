@@ -290,3 +290,22 @@ The `Docs/` and `ROADMAP/` directories serve complementary purposes:
 | **`ROADMAP/`** | Implementation Tracking | Task checklists, gap analyses, system plans, bug trackers — *how* to build it and *what's left* to build |
 
 For implementation plans, build checklists, and gap analyses, see the [`ROADMAP/`](../ROADMAP/README.md) directory.
+
+---
+
+## License
+
+This documentation is licensed under the **Creative Commons Attribution 4.0 International License (CC-BY-4.0)**.
+
+You are free to:
+- **Share** — copy and redistribute the material in any medium or format
+- **Adapt** — remix, transform, and build upon the material for any purpose, even commercially
+
+Under the following terms:
+- **Attribution** — You must give appropriate credit, provide a link to the license, and indicate if changes were made
+
+See the [LICENSE](LICENSE) file for the full legal text, or visit [https://creativecommons.org/licenses/by/4.0/](https://creativecommons.org/licenses/by/4.0/)
+
+**Copyright © 2024-2026 Olowookere Olamide and HardwareScript Contributors**
+
+**Note**: This license applies to the documentation only. The Hardware Script compiler toolchain (`hwc`) and related software are licensed separately under AGPLv3 + Commercial License. See the main repository for software licensing details.

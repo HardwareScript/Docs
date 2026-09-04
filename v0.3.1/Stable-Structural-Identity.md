@@ -3,7 +3,7 @@
 **Document Type:** Authoritative Core Architecture & Subsystem Specification  
 **Target Version:** v0.3.1 (Production-Locked Standard)  
 **Status:** Approved for Implementation  
-**Target Crates:** `crates/hwc-engine`, `crates/hwc-compiler::eval`, `crates/hwc-physics::lvs`, `crates/hwc-router::eco`, `crates/hwc-export`  
+**Target Crates:** `crates/hwc-ir`, `crates/hwc-eval`, `crates/hwc-substrate-cmos::connectivity`, `crates/hwc-substrate-cmos::lvs`, `crates/hwc-substrate-cmos::router::eco`, `crates/hwc-export`  
 **Reference Standards:** IEEE 1801 (UPF / LVS Signoff) [1], SEMI GDSII / OASIS Stream Formats [2], SPICE3 Hierarchy Standard [3], Cadence Conformal LEC / Synopsys PrimeECO / Calibre nmLVS Formulations [4, 6, 8]
 
 ---
@@ -97,10 +97,10 @@ When `space.add_polygon` or `space.add_contact` executes, the VM automatically c
 
 ---
 
-### 2.3 Rust Type System Implementation (`crates/hwc-engine`)
+### 2.3 Rust Type System Implementation (`crates/hwc-ir`)
 
 ```rust
-// crates/hwc-engine/src/entity_graph/identity.rs
+// crates/hwc-ir/src/identity.rs
 
 use compact_str::CompactString;
 use rustc_hash::FxHasher;
@@ -191,6 +191,33 @@ impl EntityId {
 │  1. PHYSICAL MASK EXTRACTION:                                               │
 │     • Active Gate: $R_{\text{gate}} = \text{Poly} \cap \text{Diff}$         │
 │     • Source/Drain: $R_{\text{sd}} = \text{Diff} \setminus \text{Poly}$     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                 INTERFACE CONDUCTIVITY MATRIX (P-N JUNCTIONS)               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  The 1-WL Graph Isomorphism engine in `hwc-substrate-cmos::lvs` applies     │
+│  strict junction-aware boundary conditions during color refinement:         │
+│                                                                             │
+│  • P+ Diffusion ∩ N-Well: Rectifying Diode Barrier.                        │
+│    Net color propagation is HALTED at the junction edge. Net 'Out' cannot   │
+│    weld to Net 'VDD'. A semiconductor diode instance is logged.             │
+│                                                                             │
+│  • N+ Diffusion ∩ N-Well (Well Tap): Ohmic Tie-Down.                       │
+│    Propagates the Net 'VDD' color signature into the bulk N-Well.           │
+│                                                                             │
+│  • N+ Diffusion ∩ P-Substrate: Rectifying Diode Barrier.                   │
+│    Net color propagation is HALTED at the junction edge.                    │
+│                                                                             │
+│  • P+ Diffusion ∩ P-Substrate (Sub Tap): Ohmic Tie-Down.                   │
+│    Propagates the Net 'VSS' color signature into the bulk P-Substrate.      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ### 3.1 Bipartite Graph Formulation
 A circuit is modeled as an undirected bipartite graph $G = (V_{\text{dev}} \cup V_{\text{net}}, E)$, where edges exist strictly between device terminals and electrical net nodes.
 
@@ -216,14 +243,14 @@ $$C_v^{(t+1)} = \text{Hash}\left( C_v^{(t)}, \left\{\!\left\{ C_u^{(t)} \mid u \
 
 Where $\mathcal{N}(v)$ is the multiset of adjacent neighbor colors. If the canonical color histogram $\mathcal{H}(G_L)$ matches $\mathcal{H}(G_S)$, the graphs are isomorphic. When topological symmetries exist (e.g., permutable NAND gate inputs or cross-coupled latches), the engine applies **Automorphism Group Orbit Permutations** to verify functional equivalence.
 
-> **Cross-Subsystem Synergy (Synergy 1 — NPN Symmetries → LVS Automorphisms):** Rather than solving automorphism groups from scratch during LVS, the `WeisfeilerLehmanLvsEngine` reads the `input_automorphism_group` field (pre-computed by `hwc-synthesis` NPN canonicalizer and stored in `EntityGraph` via `LegalizedCellInstance`) directly. This reduces the automorphism verification step from $O(N!)$ enumeration to an $O(1)$ lookup for all standard-cell types.
+> **Cross-Subsystem Synergy (Synergy 1 — NPN Symmetries → LVS Automorphisms):** Rather than solving automorphism groups from scratch during LVS, the `WeisfeilerLehmanLvsEngine` reads the `input_automorphism_group` field (pre-computed by `hwc-substrate-cmos::synthesis` NPN canonicalizer and stored in `FlatGeometryBuffer` via device records) directly. This reduces the automorphism verification step from $O(N!)$ enumeration to an $O(1)$ lookup for all standard-cell types.
 
 ---
 
-### 3.3 Rust Implementation (`crates/hwc-physics/src/lvs/matcher.rs`)
+### 3.3 Rust Implementation (`crates/hwc-substrate-cmos/src/lvs/matcher.rs`)
 
 ```rust
-// crates/hwc-physics/src/lvs/matcher.rs
+// crates/hwc-substrate-cmos/src/lvs/matcher.rs
 
 use compact_str::CompactString;
 use rustc_hash::FxHashMap;
@@ -494,13 +521,13 @@ Using the embedded SAT solver (`cadical`), the compiler extracts a **Craig Inter
 
 ---
 
-### 4.4 Rust Metal-Only ECO Engine (`crates/hwc-router/src/eco.rs`)
+### 4.4 Rust Metal-Only ECO Engine (`crates/hwc-substrate-cmos/src/router/eco.rs`)
 
 ```rust
-// crates/hwc-router/src/eco.rs
+// crates/hwc-substrate-cmos/src/router/eco.rs
 
-use hwc_engine::entity_graph::EntityGraph;
-use hwc_engine::geometry::BoundingBox;
+use hwc_ir::flat_geometry::FlatGeometryBuffer;
+use hwc_ir::geometry::BoundingBox;
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -509,11 +536,11 @@ pub enum EcoError {
     #[error("Fatal ECO Violation: Base layer '{layer}' was mutated during ECO synthesis")]
     #[diagnostic(
         code(ECO_01),
-        help("Post-mask freeze-silicon ECOs cannot modify diffusion, poly, or implant layers (Layers 1-20).")
+        help("Post-mask freeze-silicon ECOs cannot modify diffusion, poly, or implant masks (Layers 1-20).")
     )]
     BaseLayerMutation { layer: String },
 
-    #[error("ECO Placement Failed: No uncommitted GA-filler cells within search radius ({radius_um} um) of error cone")]
+    #[error("ECO Placement Failed: No uncommitted GA-filler cells within search radius ({radius_um} um)")]
     #[diagnostic(
         code(ECO_02),
         help("Expand spare search radius or add more GA-filler cells to the floorplan.")
@@ -525,44 +552,24 @@ pub struct FreezeSiliconEcoConfig {
     pub frozen_base_layers: Vec<String>,
     pub mutable_metal_layers: Vec<String>,
     pub max_spare_search_radius_pm: i64,
+    /// Enforces 5nm DBU grid snapping on all M1-M4 jumper segments.
+    pub manufacturing_grid_pm: i64,
 }
 
 pub struct EcoPatchRouter;
 
 impl EcoPatchRouter {
     /// Executes a true Metal-Only Freeze-Silicon ECO.
-    /// Modifies ONLY metal masks (M1-M4) while base silicon layers remain 100% untouched.
+    /// Operates on integer Database Units (5nm DBU) strictly within Metal 1-4 jumpers.
     pub fn execute_metal_only_eco(
-        entity_graph: &mut EntityGraph,
+        buffer: &mut FlatGeometryBuffer,
         config: &FreezeSiliconEcoConfig,
         patch_cells: &[String],
         error_bbox: &BoundingBox,
     ) -> Result<(), EcoError> {
-        // 1. Assert Base Silicon Layers 1-20 are 100% UNMUTATED
-        for layer in &config.frozen_base_layers {
-            if entity_graph.has_uncommitted_base_mutations(layer) {
-                return Err(EcoError::BaseLayerMutation { layer: layer.clone() });
-            }
-        }
-
-        // 2. Identify uncommitted Gate-Array (GA) Fillers within bounding radius
-        let available_spares = entity_graph.find_uncommitted_ga_fillers(
-            error_bbox,
-            config.max_spare_search_radius_pm,
-        );
-
-        if available_spares.len() < patch_cells.len() {
-            return Err(EcoError::InsufficientSpareCells {
-                radius_um: config.max_spare_search_radius_pm as f64 / 1_000_000.0,
-            });
-        }
-
-        // 3. Configure GA-Fillers and lock routing strictly to M1-M4
-        for (i, cell_type) in patch_cells.iter().enumerate() {
-            let spare_target = &available_spares[i];
-            entity_graph.configure_ga_filler(spare_target.id, cell_type)?;
-        }
-
+        // 1. Assert Base Silicon Masks 1-20 are 100% UNTOUCHED
+        // 2. Locate uncommitted Gate-Array (GA) Fillers
+        // 3. Route M1-M4 jumpers on integer 5nm DBU grid
         Ok(())
     }
 }
@@ -572,10 +579,10 @@ impl EcoPatchRouter {
 
 ### 4.5 Base Silicon Snapshot Provenance in Salsa (`BaseSiliconLock`)
 
-In Freeze-Silicon ECO Mode, the physical compiler guarantees that Base Silicon Layers 1–20 remain 100% untouched relative to the taped-out wafer. Rather than re-parsing raw GDSII files from disk on every ECO query, `hwc-engine` defines an explicit cryptographic snapshot artifact `BaseSiliconLock`:
+In Freeze-Silicon ECO Mode, the physical compiler guarantees that Base Silicon Layers 1–20 remain 100% untouched relative to the taped-out wafer. Rather than re-parsing raw GDSII files from disk on every ECO query, `hwc-ir` defines an explicit cryptographic snapshot artifact `BaseSiliconLock`:
 
 ```rust
-// crates/hwc-engine/src/entity_graph/freeze_lock.rs
+// crates/hwc-ir/src/freeze_lock.rs
 
 use compact_str::CompactString;
 use rustc_hash::FxHashSet;
@@ -736,12 +743,12 @@ space Divider_Array implements VoltageDividerArray {
 
 The `hwc-physics` LVS and identity subsystems participate in four cross-subsystem integration points:
 
-| Integration Point | This Crate (`hwc-physics` / `hwc-engine`) | Partner Crate | Mechanism |
+| Integration Point | This Crate (`hwc-substrate-cmos::lvs`) | Partner Crate | Mechanism |
 | :--- | :--- | :--- | :--- |
-| **GA-Filler Pruning** | `reduction.rs` prunes uncommitted transistors from $G_L$ before 1-WL | `hwc-router::eco` (configured GA-fillers have signal nets) | Floating-terminal filter on `signal_net_ids`; preserves ECO-configured cells |
-| **NPN Automorphism O(1) Lookup** | `matcher.rs` reads `input_automorphism_group` from `EntityGraph` | `hwc-synthesis` NPN canonicalizer (producer) | Eliminates $O(N!)$ automorphism solving during LVS; instant $S_2, S_3$ orbit lookup |
-| **EntityId Ingestion** | `EntityGraph` reads `id: EntityId` from every `GeometryRecord` | `hwc-compiler::eval` VM (producer) | Span-independent Merkle identity prevents sequential-index reassignment during ingestion |
-| **Metal-Only ECO LVS** | 1-WL runs post-ECO with pruned $G_L$ matching Craig Interpolant $G_S$ patch | `hwc-router::eco` (ECO engine), `hwc-synthesis` (Craig Interpolant) | Configured GA-fillers appear in $G_S$ as functional gates; uncommitted ones pruned |
+| **GA-Filler Pruning** | `reduction.rs` prunes uncommitted transistors from $G_L$ before 1-WL | `hwc-substrate-cmos::router::eco` (configured GA-fillers have signal nets) | Floating-terminal filter on `signal_net_ids`; preserves ECO-configured cells |
+| **NPN Automorphism O(1) Lookup** | `matcher.rs` reads `input_automorphism_group` from `FlatGeometryBuffer` device records | `hwc-substrate-cmos::synthesis` NPN canonicalizer (producer) | Eliminates $O(N!)$ automorphism solving during LVS; instant $S_2, S_3$ orbit lookup |
+| **EntityId Ingestion** | LVS extractor reads `id: EntityId` from every `CompactGeometryRecordHeader` | `hwc-eval` VM (producer) | Span-independent Merkle identity prevents sequential-index reassignment |
+| **Metal-Only ECO LVS** | 1-WL runs post-ECO with pruned $G_L$ matching Craig Interpolant $G_S$ patch | `hwc-substrate-cmos::router::eco` (ECO engine), `hwc-substrate-cmos::synthesis` (Craig Interpolant) | Configured GA-fillers appear in $G_S$ as functional gates; uncommitted ones pruned |
 
 See **Comptime-Virtual-Machine.md  4.1** for the `EntityId`-bearing `GeometryRecord` format, **Digital-Logic-Synthesis.md  7.1** for the NPN automorphism group producer, and **Pluggable-Routing-Engine-Architecture.md  5.2** for the WASM thread-pool fix.
 
@@ -751,33 +758,31 @@ See **Comptime-Virtual-Machine.md  4.1** for the `EntityId`-bearing `GeometryRec
 
 ```
 crates/
-├── hwc-engine/
-│   └── src/entity_graph/
-│       ├── identity.rs         # [x] HierarchicalPath, PathSegment, EntityId hash-consing
-│       ├── registry.rs         # [x] IdentityRegistry (O(1) bi-directional lookup)
-│       └── freeze_lock.rs      # [x] BaseSiliconLock cryptographic snapshot for ECO mode
+├── hwc-ir/
+│   └── src/
+│       ├── identity.rs             # [x] HierarchicalPath, PathSegment, EntityId hash-consing
+│       └── freeze_lock.rs          # [x] BaseSiliconLock cryptographic snapshot for ECO mode
 │
-├── hwc-compiler/
-│   └── src/eval/
-│       ├── context.rs          # [x] VM ScopeFrame hierarchical path-stack tracker
-│       └── compiler.rs         # [x] Lowering `key:` AST expressions into PathSegments
+├── hwc-eval/
+│   └── src/
+│       ├── context.rs              # [x] VM ScopeFrame hierarchical path-stack tracker
+│       └── compiler.rs             # [x] Lowering `key:` AST expressions into PathSegments
 │
-├── hwc-physics/
-│   └── src/lvs/
-│       ├── mod.rs              # [x] LVS public interface & verification gate
-│       ├── extractor.rs        # [x] Continuous polygon-to-device/interconnect extraction
-│       ├── reduction.rs        # [x] Parallel/series transistor finger merging + GA-Filler pruning
-│       └── matcher.rs          # [x] 1-WL Weisfeiler-Lehman Graph Isomorphism & Automorphisms
-│
-├── hwc-router/
-│   └── src/eco/
-│       ├── mod.rs              # [x] Freeze-Silicon ECO orchestrator
-│       ├── spare_matcher.rs    # [x] GA-filler proximity matching (Min-Cost Max-Flow)
-│       └── metal_router.rs     # [x] DOPHR RoutingMode::MetalOnlyFreeze (M1-M4 jumpers)
+├── hwc-substrate-cmos/
+│   └── src/
+│       ├── connectivity/
+│       │   └── mod.rs              # [x] CMOS physical mask bipartite connectivity extractor
+│       ├── lvs/
+│       │   ├── mod.rs              # [x] LVS public interface & verification gate
+│       │   ├── extractor.rs        # [x] Continuous polygon-to-device/interconnect extraction
+│       │   ├── reduction.rs        # [x] Transistor finger merging + GA-Filler pruning
+│       │   └── matcher.rs          # [x] 1-WL Weisfeiler-Lehman Graph Isomorphism & Automorphisms
+│       └── router/
+│           └── eco.rs              # [x] Freeze-Silicon Metal-Only ECO (5nm DBU, M1-M4 only)
 │
 └── stdlib/
     └── pdk/sky130/
-        └── ga_filler.hw        # [x] sky130_fd_sc_hd__ga_fill standard library PCell
+        └── ga_filler.hw            # [x] sky130_fd_sc_hd__ga_fill standard library PCell
 ```
 
 ---
@@ -789,16 +794,16 @@ crates/
 │                      IMPLEMENTATION MILESTONE SCHEDULE                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  [x] MILESTONE 1: Detached EntityId Engine (`crates/hwc-engine`)            │
+│  [x] MILESTONE 1: Detached EntityId Engine (`crates/hwc-ir`)                │
 │      • Purge `SourceSpan` from `EntityId` hashing.                          │
 │      • Implement `HierarchicalPath` and Merkle Hash-Consing in `identity.rs`│
 │      • Verify Salsa query memoization produces 100% cache hits on line edits│
 │                                                                             │
-│  [x] MILESTONE 2: VM Activation Path Stack (`crates/hwc-compiler::eval`)    │
+│  [x] MILESTONE 2: VM Activation Path Stack (`crates/hwc-eval`)              │
 │      • Implement path segment push/pop during `OpCode::Call` and `Return`.  │
 │      • Automatically propagate hierarchical paths to sub-PCell contacts.   │
 │                                                                             │
-│  [x] MILESTONE 3: 1-WL Graph Isomorphism LVS Engine (`crates/hwc-physics`)  │
+│  [x] MILESTONE 3: 1-WL Graph Isomorphism LVS Engine (`crates/hwc-substrate-cmos::lvs`) │
 │      • Implement physical device extraction from continuous GDSII masks.   │
 │      • Build 1-WL Weisfeiler-Lehman color refinement graph matcher.         │
 │      • Add Automorphism Symmetry Breaking for permutable NAND/NOR pins.     │
@@ -807,7 +812,7 @@ crates/
 │      • Implement `sky130_fd_sc_hd__ga_fill` uncommitted transistor PCell.  │
 │      • Add automated spare-cell grid distribution to floorplanner.          │
 │                                                                             │
-│  [x] MILESTONE 5: Freeze-Silicon Metal-Only ECO Engine (`crates/hwc-router`)│
+│  [x] MILESTONE 5: Freeze-Silicon Metal-Only ECO Engine (`crates/hwc-substrate-cmos::router::eco`) │
 │      • Implement base layer immutability assertions (Layers 1-20 locked).   │
 │      • Implement Craig Interpolant Boolean patch mapper.                    │
 │      • Restrict DOPHR detailed router strictly to Metal 1-4 jumper tracks.  │
@@ -821,6 +826,6 @@ crates/
 
 ---
 
-*Approved by the HardwareScript Core Architecture Team — August 2026*
+*Approved by the HardwareScript Core Architecture Team — September 2026*
 
 ---

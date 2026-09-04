@@ -3,7 +3,7 @@
 **Document Type:** Authoritative Core Architecture & Subsystem Specification  
 **Target Version:** v0.3.1 (Production-Locked Standard)  
 **Status:** Approved for Implementation  
-**Target Crates:** `crates/hwc-compiler::eval`, `crates/hwc-compiler::typeck`, `crates/hwc-engine::entity_graph`, `crates/hwc-parser`  
+**Target Crates:** `crates/hwc-frontend`, `crates/hwc-eval`, `crates/hwc-ir`  
 **Reference Standards:** ISO/IEC 80000-1 (Quantities and Units), IEEE 1801 (UPF), OpenAccess Physical Cell Hierarchy Standard, Rust `uom` (Type-Level Dimensional Analysis)
 
 ---
@@ -71,9 +71,12 @@ In HardwareScript v0.3.1, a PCell is a **pure function** that returns a self-con
                                   ▼ Explicit Space Instantiation
           `space.place(transformed_cell, at: [10.0um, 5.0um])`
                                   │
-                                  ▼ Coordinate Offset & Merkle Identity Baking
-                     Global `GeometryBuffer` Ingestion
+                                  ▼ Picometer Offset & Merkle Identity Baking
+         `FlatGeometryBuffer` Ingestion (`crates/hwc-ir`)
+         (Target-agnostic picometer records; zero substrate assumptions)
 ```
+
+> **Target-Agnostic Isolation:** A `CellLayout` emits purely relative, target-agnostic picometer polygons and contacts into `FlatGeometryBuffer`. It has zero knowledge of whether it will be synthesized into silicon masks or extruded into PCB copper slabs. Substrate realization is deferred entirely to the downstream backend (`crates/hwc-substrate-cmos`, `crates/hwc-substrate-laminate`).
 
 ### 2.3 Syntax & Usage in `.hw`
 
@@ -346,9 +349,43 @@ This complete, canonical v0.3.1 implementation demonstrates all four pillars wor
 # diff_amp.hw - HardwareScript v0.3.1 Canonical Implementation
 import * from @std/primitives/units
 import { sky130_nmos, sky130_pmos } from @std/pdk/sky130
-import { SKY130_1V8_CMOS } from @std/pdk/sky130/profile
+import { SemiconductorSubstrate } from @std/substrates
 
-# ── 1. Structural Interface Bundles ──────────────────────────────────────────
+# ── 1. Static Nominal Substrate Contract ─────────────────────────────────────
+
+export profile SKY130_1V8_CMOS implements SemiconductorSubstrate {
+    manufacturing_grid: 5nm
+    lambda: 50nm
+
+    masks {
+        nwell:  { gds_layer: 64, datatype: 20 }
+        diff:   { gds_layer: 65, datatype: 20 }
+        tap:    { gds_layer: 65, datatype: 44 }
+        nsdm:   { gds_layer: 93, datatype: 44 }
+        psdm:   { gds_layer: 94, datatype: 20 }
+        poly:   { gds_layer: 66, datatype: 20 }
+        licon:  { gds_layer: 66, datatype: 44 }
+        li1:    { gds_layer: 67, datatype: 20 }
+        mcon:   { gds_layer: 67, datatype: 44 }
+        metal1: { gds_layer: 68, datatype: 20 }
+    }
+
+    routing {
+        topology: "manhattan"
+        grid: 5nm
+        preferred_directions {
+            li1:    "horizontal"
+            metal1: "vertical"
+        }
+    }
+
+    drc {
+        antenna_ratio_max: 400.0
+        min_density metal1: 20%
+    }
+}
+
+# ── 2. Structural Interface Bundles ──────────────────────────────────────────
 
 struct DiffPair {
     p: Net,
@@ -481,4 +518,4 @@ CapacitanceDensityUnit ::= "fF_um2" | "aF_um2" | "pC_um2"
 
 ---
 
-*Approved by the HardwareScript Core Architecture Team — August 2026*
+*Approved by the HardwareScript Core Architecture Team — September 2026*

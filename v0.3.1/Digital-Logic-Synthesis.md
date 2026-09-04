@@ -1,10 +1,10 @@
 # HardwareScript v0.3.1: Digital Logic Synthesis Architecture, Crate Isolation, Priority $K$-Cut Technology Mapping, Universal `wasm64` Extensibility & Formal Verification Specification
 
 **Document Type:** Authoritative Core Architecture & Subsystem Specification  
-**Target Version:** v0.3.1 (Recommended & Production-Locked Standard)  
+**Target Version:** v0.3.1 (Production-Locked Standard)  
 **Status:** Approved for Implementation  
-**Target Crate:** `crates/hwc-synthesis`  
-**Downstream Dependents:** `hwc-compiler`, `hwc-engine`, `hwc-router`, `hwc-physics`, `hwc-export`  
+**Target Crate:** `crates/hwc-substrate-cmos::synthesis` (or `crates/hwc-synthesis` consumed exclusively by CMOS)  
+**Downstream Dependents:** `hwc-eval`, `hwc-ir`, `hwc-substrate-cmos`, `hwc-export`  
 **Reference Standards:** And-Inverter Graph (AIG) Synthesis [1], Functionally Reduced AIGs (FRAIGs) [2], Priority $K$-Cut Technology Mapping [3], IEEE 1801 Liberty Standard Cell Format [4], Combinational Equivalence Checking (CEC) [5], W3C WebAssembly 64-Bit Linear Memory (`Memory64`) [6]
 
 ---
@@ -48,7 +48,7 @@ HardwareScript v0.3.1 introduces a high-throughput, mathematically sound **3-Tie
 
 ## 2. End-to-End Synthesis Pipeline
 
-The synthesis pipeline operates as a deterministic, unidirectional transformation from high-level behavioral expressions down to technology-mapped standard-cell macros placed directly into the master `EntityGraph`:
+The synthesis pipeline operates as a deterministic, unidirectional transformation from high-level behavioral expressions down to technology-mapped standard-cell macros emitted as `CompactGeometryRecordHeader` records into `hwc-ir::FlatGeometryBuffer`:
 
 ```
                        HARDWARESCRIPT SYNTHESIS PIPELINE
@@ -97,9 +97,12 @@ The synthesis pipeline operates as a deterministic, unidirectional transformatio
                                       │ Verified Standard-Cell Instances
                                       ▼
  ┌─────────────────────────────────────────────────────────────────────────┐
- │ STAGE 7: CANONICAL DATABASE INGESTION (`hwc-engine::EntityGraph`)       │
- │ • Converts standard cells into discrete macro rows at picometer DBU.    │
- │ • Exposes cell pin coordinates to `hwc-router` 4-Stage Routing Engine.  │
+ │ STAGE 7: FLAT GEOMETRY BUFFER EMISSION (`hwc-ir::FlatGeometryBuffer`)   │
+ │ • Converts mapped standard cells into `CompactGeometryRecordHeader`     │
+ │   records with `RecordType::Device`.                                    │
+ │ • Emits picometer DBU coordinates into the contiguous coordinate pool.  │
+ │ • Cell records consumed directly by `crates/hw/src/dispatch.rs`.        │
+ │ • Detailed Router Stage 1 (PAA) reads pin locations from buffer.        │
  └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -461,7 +464,7 @@ At deep sub-micron process nodes, interconnect wire delay accounts for up to $80
 
 ### 7.1 Standard-Cell Row Legalization (Abacus / DP-Legalizer)
 
-> **Cross-Subsystem Fix (Seam 2 — Digital Placement vs. PAA Grid Alignment):** The quadratic analytical placer outputs floating $(X, Y)$ coordinates. Without snapping to the PDK site grid, cells sit off-grid and `hwc-router` Stage 1 PAA emits `Error R01: PinAccessStarvation`. The **Standard-Cell Row Legalizer** (`crates/hwc-synthesis/src/mapper/row_legalizer.rs`) runs immediately after the quadratic solve and before `EntityGraph` ingestion.
+> **Cross-Subsystem Fix (Seam 2 — Digital Placement vs. PAA Grid Alignment):** The quadratic analytical placer outputs floating $(X, Y)$ coordinates. Without snapping to the PDK site grid, cells sit off-grid and `hwc-substrate-cmos::router` Stage 1 PAA emits `Error R01: PinAccessStarvation`. The **Standard-Cell Row Legalizer** (`crates/hwc-substrate-cmos/src/synthesis/row_legalizer.rs`) runs immediately after the quadratic solve and before `FlatGeometryBuffer` emission.
 
 ```
   ❌ UNLEGALIZED QUADRATIC PLACEMENT          ✅ ROW-LEGALIZED & ABUTTED CELLS
@@ -490,10 +493,10 @@ pub struct StandardCellSiteRow {
     pub is_flipped_y: bool, // Alternates VDD/VSS orientation
 }
 
-/// A legalized standard-cell placement record ready for EntityGraph ingestion.
+/// A legalized standard-cell placement record ready for FlatGeometryBuffer emission.
 /// `input_automorphism_group` carries the symmetric pin permutation group
-/// computed by the NPN canonicalizer, forwarded to `hwc-physics` LVS and
-/// `hwc-router` pin swapping without duplicate automorphism solving.
+/// computed by the NPN canonicalizer, forwarded to `hwc-substrate-cmos::lvs` and
+/// `hwc-substrate-cmos::router` pin swapping without duplicate automorphism solving.
 #[derive(Debug, Clone)]
 pub struct LegalizedCellInstance {
     pub instance_name: CompactString,
@@ -561,21 +564,21 @@ This spreads standard cells away from congested macro boundaries during logic sy
 
 ### 7.4 Single-Source Permittivity in Shift-Left Analytical Synthesis
 
-To ensure that wire delays calculated during in-loop synthesis are bit-exact with the signoff BEM extraction in `hwc-physics`, the analytical placer queries `StackupManager::get_stackup_dielectric_context()` directly from `hwc-engine` rather than relying on hardcoded constants ($\varepsilon_r = 3.9$):
+To ensure that wire delays calculated during in-loop synthesis are bit-exact with signoff BEM extraction, the analytical placer queries `StackupConfig` directly from `hwc-ir` rather than relying on hardcoded constants ($\varepsilon_r = 3.9$):
 
 ```rust
-// crates/hwc-synthesis/src/mapper/placer_loop.rs (STA Delay Calculator)
+// crates/hwc-substrate-cmos/src/synthesis/placer_loop.rs (STA Delay Calculator)
 
-use hwc_engine::stackup::StackupManager;
+use hwc_ir::stackup::StackupConfig;
 
 pub struct ShiftLeftDelayEstimator<'a> {
-    pub stackup: &'a StackupManager,
-    pub target_layer: &'static str,
+    pub stackup: &'a StackupConfig,
+    pub target_layer_idx: u16,
 }
 
 impl<'a> ShiftLeftDelayEstimator<'a> {
-    pub fn new(stackup: &'a StackupManager, target_layer: &'static str) -> Self {
-        Self { stackup, target_layer }
+    pub fn new(stackup: &'a StackupConfig, target_layer_idx: u16) -> Self {
+        Self { stackup, target_layer_idx }
     }
 
     /// Computes physical RC delay for a Steiner interconnect segment in picoseconds
@@ -700,9 +703,12 @@ To synthesize mega-scale digital architectures (such as 64-bit Linux-capable mul
 
 ### 9.1 The Universal 64-Bit Memory64 ABI (Pure Rust Canonical Definition)
 
-The single source of truth for the synthesis plugin interface is maintained in pure Rust with `#[repr(C)]` layouts targeting W3C WebAssembly `Memory64`:
+The single source of truth for the synthesis plugin interface is maintained in `hwc_ir::abi::stage_abi` and re-exported from `crates/hwc-substrate-wasm`:
+
+> **Tier-2 Stage ABI Alignment:** `HwcSynthesisTask64` and `HwcSynthesisOutput64` implement the Tier-2 Stage ABI defined in `hwc_ir::abi::stage_abi`. External plugins must target this unified ABI; no ad-hoc struct variants are permitted outside of this module.
 
 ```rust
+// crates/hwc-ir/src/abi/stage_abi.rs (Synthesis Variant)
 use std::ffi::c_char;
 
 /// 1. Synthesized Standard-Cell Instance Record (64-bit pointers)
@@ -918,8 +924,8 @@ space Chip_Layout implements HybridAccelerator {
 [CEC PROOF] Formulating Combinational SAT Miter: 30 outputs verified
 [CEC PROOF] SAT Solver Result: UNSAT (100% Formal Equivalence Proven in 0.82ms)
    ✅ Logic Synthesis Completed in 3.18 ms (Gate Count: 30, Total Area: 184.32 um^2)
-── Ingesting synthesized standard cells into master EntityGraph ──
-[   14.20ms] `hwc-router` 4-Stage Routing complete (0 DRC clearance violations)
+── Emitting synthesized standard cells into FlatGeometryBuffer ──
+[   14.20ms] `hwc-substrate-cmos::router` 4-Stage Routing complete (0 DRC clearance violations)
 [   18.45ms] PIVB topological connectivity check: 1 Connected Component (Clean)
 [   22.10ms] Sakurai BEM parasitic extraction: circuit.sp emitted
    ✅ GDSII: build/Chip_Layout/board.gds (3.4ms)
@@ -956,13 +962,13 @@ space Chip_Layout implements HybridAccelerator {
 
 The `hwc-synthesis` crate is the hub of three cross-subsystem synergies introduced in v0.3.1:
 
-| Integration Point | This Crate (`hwc-synthesis`) | Partner Crate | Mechanism |
+| Integration Point | This Crate (`hwc-substrate-cmos::synthesis`) | Partner Crate | Mechanism |
 | :--- | :--- | :--- | :--- |
-| **NPN Automorphism Sharing** | NPN canonicalizer computes $S_2, S_3$ permutation groups per cell | `hwc-engine::EntityGraph` → `hwc-physics` LVS & `hwc-router` Stage 3 | `LegalizedCellInstance.input_automorphism_group` attached to instance in `EntityGraph`; consumed without re-computation |
-| **Row Legalization** | `StandardCellRowLegalizer` snaps quadratic floating coords to site grid | `hwc-router` Stage 1 PAA | Prevents `Error R01: PinAccessStarvation`; ensures on-grid pin landing |
-| **Congestion Feedback** | `placer_loop.rs` reads `VolumetricTensor3D` penalty field | `hwc-router` global tensor | Spreads cells from congested macro boundaries; eliminates multi-pass routing closure |
-| **Dielectric Calibration** | `ShiftLeftDelayEstimator` queries `StackupManager` | `hwc-engine` Stackup | Exact correlation with `hwc-physics` BEM signoff extraction |
-| **Power Rail Continuity** | Abutted cell placement via `row_legalizer.rs` | `hwc-physics` PIVB Tarjan SCC | Overlapping rail polygons auto-welded by Clipper2 into continuous planar islands |
+| **NPN Automorphism Sharing** | NPN canonicalizer computes $S_2, S_3$ permutation groups per cell | `FlatGeometryBuffer` → `hwc-substrate-cmos::lvs` & `hwc-substrate-cmos::router` Stage 3 | `LegalizedCellInstance.input_automorphism_group` attached to instance in `FlatGeometryBuffer`; consumed without re-computation |
+| **Row Legalization** | `StandardCellRowLegalizer` snaps quadratic floating coords to site grid | `hwc-substrate-cmos::router` Stage 1 PAA | Prevents `Error R01: PinAccessStarvation`; ensures on-grid pin landing |
+| **Congestion Feedback** | `placer_loop.rs` reads `VolumetricTensor3D` penalty field | `hwc-substrate-cmos::router` global tensor | Spreads cells from congested macro boundaries; eliminates multi-pass routing closure |
+| **Dielectric Calibration** | `ShiftLeftDelayEstimator` queries `StackupConfig` | `hwc-ir::stackup` | Exact correlation with BEM signoff extraction |
+| **Power Rail Continuity** | Abutted cell placement via `row_legalizer.rs` | `hwc-substrate-cmos::physics` PIVB Tarjan SCC | Overlapping rail polygons auto-welded by Clipper2 into continuous planar islands |
 
 ---
 
@@ -1045,13 +1051,15 @@ crates/hwc-synthesis/
 │      • Implement embedded Wasmtime Memory64 execution bridge.               │
 │      • Support loading external Tier 3 Yosys/ABC `.wasm` plugins.           │
 │                                                                             │
-│  [x] MILESTONE 7: End-to-End Physical Ingestion into `EntityGraph`          │
-│      • Ingest mapped standard-cell rows into master `EntityGraph`.          │
-│      • Run full synthesis on `accelerator.hw` with 0 DRC and LVS errors.    │
+│  [x] MILESTONE 7: Physical Emission into `FlatGeometryBuffer`             │
+│      • Emit mapped standard-cell rows as `CompactGeometryRecordHeader`     │
+│        items with `RecordType::Device` into `hwc-ir::FlatGeometryBuffer`. │
+│      • Records consumed directly by `crates/hw/src/dispatch.rs` for      │
+│        dedicated CMOS substrate routing — no intermediate EntityGraph.   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-*Approved by the HardwareScript Core Architecture Team — August 2026*
+*Approved by the HardwareScript Core Architecture Team — September 2026*
