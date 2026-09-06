@@ -1,3 +1,19 @@
+> [!CAUTION]
+> ## ⚰️ PROJECT PERMANENTLY TERMINATED — SEPTEMBER 2026
+>
+> **HardwareScript has been permanently shut down and archived.**
+>
+> After 9 months of development, the project was concluded to be a fundamental category error. All documentation in this directory — language specs, architecture guides, and vision documents — is **permanently frozen**. No further revisions will be made.
+>
+> - This documentation describes a **dead language** (`.hw`) and a **decommissioned compiler** (`hwc`).
+> - **No further development, issues, or PRs will be accepted.**
+>
+> For the full technical post-mortem explaining *why* the project failed, see [`End/Final-Status.md`](End/Final-Status.md).
+>
+> *HardwareScript Architecture Team — September 2026*
+
+---
+
 # Hardware Script — Documentation
 
 This directory contains the **official language specifications, architecture guides, vision documents, and technical references** for the [Hardware Script](https://github.com/hardware-script) language and its compiler toolchain.
@@ -10,7 +26,13 @@ Each version directory tracks the evolving documentation for a specific release 
 
 ```
 Docs/
-├── README.md              ← This file
+├── README.md                                                  ← This file
+├── v0.3.2/                                                    ← ⭐️ SOLE PRODUCTION-LOCKED SPEC (v0.3.2)
+│   ├── Grand-Unified-Specification.md                         Master Architectural Constitution (SSOT)
+│   ├── Grammar-and-Lexicon.md                                 Formal EBNF Grammar & Lexical Specification
+│   ├── Bytecode-ISA-and-VM.md                                 OpCodes, Value Model, Fuel & Dispatch Loop
+│   ├── FFI-and-WASM64-ABI.md                                  Universal FFI & WebAssembly Memory64 ABI
+│   └── Standard-Library-PCells.md                             Standard Library & Certified SKY130 PCells
 │
 ├── v0.0.1/  — Pre-Alpha Research & Prototyping
 │   ├── ARCHITECTURE.md          System architecture planning
@@ -225,6 +247,8 @@ Current release. Focuses on:
 ---
 
 ## How to Use These Documents
+
+0. **Production-Locked Compiler Architecture (Current Standard)?** → Read `v0.3.2/Grand-Unified-Specification.md` — the **sole, definitive, single source of truth** for the v0.3.2 compiler architecture, 8-crate workspace, Flat IR arena, pure PCell execution, and substrate-segregated pipelines.
 
 1. **New to Hardware Script?** → Start at `v0.1/README.md` for the MVP overview, then `v0.1/GETTING-STARTED.md` for a tutorial.
 
